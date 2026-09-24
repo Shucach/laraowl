@@ -6,13 +6,14 @@ use App\Http\Controllers\Controller;
 use App\Models\Integration;
 use App\Models\Project;
 use App\Models\Team;
+use App\Services\CloudflareService;
 use App\Services\IntegrationService;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
 
 class IntegrationController extends Controller
 {
-    public function index(Request $request, Team $current_team, Project $project, IntegrationService $service)
+    public function index(Request $request, Team $current_team, Project $project, IntegrationService $service, CloudflareService $cloudflareService)
     {
         return Inertia::render('projects/settings/index', [
             'project' => $project->makeVisible(['api_token'])->load(['integrations', 'alertRules.integrations', 'thresholds']),
@@ -20,6 +21,7 @@ class IntegrationController extends Controller
             'alert_rules' => $project->alertRules,
             'available_types' => $service->getAvailableTypes(),
             'team_members' => $current_team->users,
+            'cloudflare' => $cloudflareService->connectionSummary($project),
         ]);
     }
 

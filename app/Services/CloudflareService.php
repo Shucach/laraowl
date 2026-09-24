@@ -15,6 +15,32 @@ class CloudflareService
         return ! empty($settings['api_token']) && ! empty($settings['zone_id']);
     }
 
+    /**
+     * Get the connection status without exposing the API token.
+     *
+     * @return array{connected: bool, zone_id: string|null, token_hint: string|null, connected_at: string|null}
+     */
+    public function connectionSummary(Project $project): array
+    {
+        if (! $this->isConfigured($project)) {
+            return [
+                'connected' => false,
+                'zone_id' => null,
+                'token_hint' => null,
+                'connected_at' => null,
+            ];
+        }
+
+        $settings = $project->settings['cloudflare'];
+
+        return [
+            'connected' => true,
+            'zone_id' => $settings['zone_id'],
+            'token_hint' => substr($settings['api_token'], -4),
+            'connected_at' => $settings['connected_at'] ?? null,
+        ];
+    }
+
     public function checkHealth(Project $project): bool
     {
         if (! $this->isConfigured($project)) {

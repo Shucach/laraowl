@@ -20,10 +20,13 @@ import {
     AlertCircle,
     Info,
     Lock,
+    ShieldCheck,
+    Unplug,
 } from 'lucide-react';
 
 import { useState } from 'react';
 import { toast } from 'sonner';
+import ProjectController from '@/actions/App/Http/Controllers/Projects/ProjectController';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -75,6 +78,7 @@ export default function ProjectSettings({
     integrations,
     alert_rules,
     available_types,
+    cloudflare,
 }: any) {
     const { props } = usePage<SharedData>();
     const teamSlug = props.currentTeam?.slug || '';
@@ -123,9 +127,13 @@ export default function ProjectSettings({
 
     // Cloudflare Form
     const cloudflareForm = useForm({
-        api_token: project.settings?.cloudflare?.api_token || '',
-        zone_id: project.settings?.cloudflare?.zone_id || '',
+        api_token: '',
+        zone_id: '',
     });
+    const [isDisconnectCloudflareOpen, setIsDisconnectCloudflareOpen] =
+        useState(false);
+    const [isDisconnectingCloudflare, setIsDisconnectingCloudflare] =
+        useState(false);
 
     const [activeTab, setActiveTab] = useState(() => {
         if (typeof window !== 'undefined') {
@@ -151,9 +159,36 @@ export default function ProjectSettings({
 
     const handleUpdateCloudflare = (e: React.FormEvent) => {
         e.preventDefault();
-        cloudflareForm.patch(`/${teamSlug}/${projectSlug}/cloudflare`, {
-            onSuccess: () => toast.success('Cloudflare settings updated'),
-        });
+        cloudflareForm.patch(
+            ProjectController.updateCloudflare.url({
+                current_team: teamSlug,
+                project: projectSlug,
+            }),
+            {
+                onSuccess: () => {
+                    cloudflareForm.reset();
+                    toast.success('Cloudflare connected successfully');
+                },
+            },
+        );
+    };
+
+    const handleDisconnectCloudflare = () => {
+        router.delete(
+            ProjectController.disconnectCloudflare.url({
+                current_team: teamSlug,
+                project: projectSlug,
+            }),
+            {
+                preserveScroll: true,
+                onStart: () => setIsDisconnectingCloudflare(true),
+                onFinish: () => setIsDisconnectingCloudflare(false),
+                onSuccess: () => {
+                    setIsDisconnectCloudflareOpen(false);
+                    toast.success('Cloudflare integration disconnected');
+                },
+            },
+        );
     };
 
     const handleUpdateProject = (e: React.FormEvent) => {
@@ -1952,250 +1987,374 @@ export default function ProjectSettings({
 
                     {/* Cloudflare Settings */}
                     <TabsContent value="cloudflare">
-                        <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-12">
-                            <Card className="overflow-hidden shadow-2xl lg:col-span-7">
+                        {cloudflare?.connected ? (
+                            <Card className="overflow-hidden shadow-2xl">
                                 <CardHeader>
                                     <div className="flex items-center gap-3">
-                                        <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-primary/20 bg-primary/10 shadow-lg">
-                                            <ShieldAlert className="h-7 w-7 text-primary" />
+                                        <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-emerald-500/20 bg-emerald-500/10 shadow-lg">
+                                            <ShieldCheck className="h-7 w-7 text-emerald-500" />
                                         </div>
                                         <div>
-                                            <CardTitle className="text-lg font-black tracking-tight text-foreground">
-                                                Cloudflare Integration
-                                            </CardTitle>
+                                            <div className="flex items-center gap-2">
+                                                <CardTitle className="text-lg font-black tracking-tight text-foreground">
+                                                    Cloudflare Connected
+                                                </CardTitle>
+                                                <Badge className="border-none bg-emerald-500/10 text-[9px] font-black tracking-widest text-emerald-500 uppercase">
+                                                    Active
+                                                </Badge>
+                                            </div>
                                             <CardDescription className="text-xs">
-                                                Connect your zone to enable edge
+                                                Your zone is linked. Edge
                                                 security metrics and rule
-                                                management.
+                                                management are enabled.
                                             </CardDescription>
                                         </div>
                                     </div>
                                 </CardHeader>
                                 <CardContent className="p-6">
-                                    <form
-                                        onSubmit={handleUpdateCloudflare}
-                                        className="space-y-8"
-                                    >
-                                        <div className="space-y-6">
-                                            <div className="space-y-3">
-                                                <Label
-                                                    htmlFor="api_token"
-                                                    className="text-[10px] font-black tracking-widest text-muted-foreground uppercase"
+                                    <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                                        {[
+                                            {
+                                                label: 'Zone ID',
+                                                value: cloudflare.zone_id,
+                                            },
+                                            {
+                                                label: 'API Token',
+                                                value: `••••••••${cloudflare.token_hint}`,
+                                            },
+                                            {
+                                                label: 'Connected Since',
+                                                value: cloudflare.connected_at
+                                                    ? new Date(
+                                                          cloudflare.connected_at,
+                                                      ).toLocaleString()
+                                                    : '—',
+                                            },
+                                        ].map((item) => (
+                                            <div
+                                                key={item.label}
+                                                className="space-y-1 rounded-xl border border-border bg-muted/30 p-4"
+                                            >
+                                                <div className="text-[10px] font-black tracking-widest text-muted-foreground uppercase">
+                                                    {item.label}
+                                                </div>
+                                                <div className="truncate font-mono text-xs text-foreground">
+                                                    {item.value}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+
+                                    <div className="mt-6 flex items-center justify-end border-t border-border/50 pt-6">
+                                        <Dialog
+                                            open={isDisconnectCloudflareOpen}
+                                            onOpenChange={
+                                                setIsDisconnectCloudflareOpen
+                                            }
+                                        >
+                                            <DialogTrigger asChild>
+                                                <Button
+                                                    variant="destructive"
+                                                    className="h-11 rounded-xl bg-red-500/10 px-8 text-xs font-black tracking-widest text-red-500 uppercase transition-all hover:bg-red-500 hover:text-white"
                                                 >
-                                                    API Token
-                                                </Label>
-                                                <Input
-                                                    id="api_token"
-                                                    type="password"
-                                                    placeholder="Enter your Cloudflare API Token"
-                                                    className={`h-11 border-border bg-muted/50 font-mono text-xs focus:ring-primary/20 ${cloudflareForm.errors.api_token ? 'border-red-500 ring-1 ring-red-500/20' : ''}`}
-                                                    value={
-                                                        cloudflareForm.data
-                                                            .api_token
-                                                    }
-                                                    onChange={(e) =>
-                                                        cloudflareForm.setData(
-                                                            'api_token',
-                                                            e.target.value,
-                                                        )
-                                                    }
-                                                />
-                                                {cloudflareForm.errors
-                                                    .api_token && (
-                                                    <p className="animate-in text-[10px] font-bold text-red-500 fade-in slide-in-from-top-1">
-                                                        {
-                                                            cloudflareForm
-                                                                .errors
+                                                    <Unplug className="mr-2 size-3.5" />
+                                                    Disconnect
+                                                </Button>
+                                            </DialogTrigger>
+                                            <DialogContent className="border-border bg-background text-foreground">
+                                                <DialogHeader>
+                                                    <DialogTitle className="flex items-center gap-2 text-red-500">
+                                                        <Unplug className="h-5 w-5" />{' '}
+                                                        Disconnect Cloudflare?
+                                                    </DialogTitle>
+                                                    <DialogDescription className="pt-4 text-muted-foreground">
+                                                        The stored API token and
+                                                        Zone ID will be removed.
+                                                        Firewall metrics and
+                                                        rule management will
+                                                        stop working until you
+                                                        connect again. Your
+                                                        Cloudflare zone itself
+                                                        is not changed.
+                                                    </DialogDescription>
+                                                </DialogHeader>
+                                                <div className="py-4">
+                                                    <Button
+                                                        variant="destructive"
+                                                        className="h-11 w-full text-[10px] font-black tracking-widest uppercase"
+                                                        disabled={
+                                                            isDisconnectingCloudflare
+                                                        }
+                                                        onClick={
+                                                            handleDisconnectCloudflare
+                                                        }
+                                                    >
+                                                        {isDisconnectingCloudflare && (
+                                                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                                        )}
+                                                        Disconnect Integration
+                                                    </Button>
+                                                </div>
+                                            </DialogContent>
+                                        </Dialog>
+                                    </div>
+                                </CardContent>
+                            </Card>
+                        ) : (
+                            <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-12">
+                                <Card className="overflow-hidden shadow-2xl lg:col-span-7">
+                                    <CardHeader>
+                                        <div className="flex items-center gap-3">
+                                            <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-primary/20 bg-primary/10 shadow-lg">
+                                                <ShieldAlert className="h-7 w-7 text-primary" />
+                                            </div>
+                                            <div>
+                                                <CardTitle className="text-lg font-black tracking-tight text-foreground">
+                                                    Cloudflare Integration
+                                                </CardTitle>
+                                                <CardDescription className="text-xs">
+                                                    Connect your zone to enable
+                                                    edge security metrics and
+                                                    rule management.
+                                                </CardDescription>
+                                            </div>
+                                        </div>
+                                    </CardHeader>
+                                    <CardContent className="p-6">
+                                        <form
+                                            onSubmit={handleUpdateCloudflare}
+                                            className="space-y-8"
+                                        >
+                                            <div className="space-y-6">
+                                                <div className="space-y-3">
+                                                    <Label
+                                                        htmlFor="api_token"
+                                                        className="text-[10px] font-black tracking-widest text-muted-foreground uppercase"
+                                                    >
+                                                        API Token
+                                                    </Label>
+                                                    <Input
+                                                        id="api_token"
+                                                        type="password"
+                                                        placeholder="Enter your Cloudflare API Token"
+                                                        className={`h-11 border-border bg-muted/50 font-mono text-xs focus:ring-primary/20 ${cloudflareForm.errors.api_token ? 'border-red-500 ring-1 ring-red-500/20' : ''}`}
+                                                        value={
+                                                            cloudflareForm.data
                                                                 .api_token
                                                         }
-                                                    </p>
-                                                )}
-
-                                                <div className="space-y-3 rounded-xl border border-border bg-muted/30 p-4">
-                                                    <div className="flex items-center gap-2 text-[10px] font-black tracking-widest text-foreground uppercase">
-                                                        <Lock className="size-3 text-primary" />
-                                                        Required Token
-                                                        Permissions
-                                                    </div>
-                                                    <div className="grid grid-cols-1 gap-2">
-                                                        {[
-                                                            {
-                                                                p: 'Zone.Zone',
-                                                                l: 'Read',
-                                                                desc: 'Basic zone info',
-                                                            },
-                                                            {
-                                                                p: 'Zone.Settings',
-                                                                l: 'Edit',
-                                                                desc: 'Attack mode & WAF',
-                                                            },
-                                                            {
-                                                                p: 'Zone.Analytics',
-                                                                l: 'Read',
-                                                                desc: 'Traffic metrics',
-                                                            },
-                                                            {
-                                                                p: 'Zone.Firewall Services',
-                                                                l: 'Edit',
-                                                                desc: 'IP & Firewall rules',
-                                                            },
-                                                        ].map((perm, i) => (
-                                                            <div
-                                                                key={i}
-                                                                className="flex flex-col gap-0.5 rounded-lg border border-border/50 bg-background/50 p-2"
-                                                            >
-                                                                <div className="flex items-center justify-between">
-                                                                    <code className="text-[9px] font-bold text-primary">
-                                                                        {perm.p}
-                                                                    </code>
-                                                                    <Badge
-                                                                        variant="outline"
-                                                                        className="h-3.5 bg-primary/5 px-1 text-[8px] font-black"
-                                                                    >
-                                                                        {perm.l}
-                                                                    </Badge>
-                                                                </div>
-                                                                <span className="text-[8px] font-medium text-muted-foreground">
-                                                                    {perm.desc}
-                                                                </span>
-                                                            </div>
-                                                        ))}
-                                                    </div>
-                                                </div>
-                                            </div>
-
-                                            <div className="space-y-3">
-                                                <Label
-                                                    htmlFor="zone_id"
-                                                    className="text-[10px] font-black tracking-widest text-muted-foreground uppercase"
-                                                >
-                                                    Zone ID
-                                                </Label>
-                                                <Input
-                                                    id="zone_id"
-                                                    placeholder="Enter your Cloudflare Zone ID"
-                                                    className={`h-11 border-border bg-muted/50 font-mono text-xs focus:ring-primary/20 ${cloudflareForm.errors.zone_id ? 'border-red-500 ring-1 ring-red-500/20' : ''}`}
-                                                    value={
-                                                        cloudflareForm.data
-                                                            .zone_id
-                                                    }
-                                                    onChange={(e) =>
-                                                        cloudflareForm.setData(
-                                                            'zone_id',
-                                                            e.target.value,
-                                                        )
-                                                    }
-                                                />
-                                                {cloudflareForm.errors
-                                                    .zone_id && (
-                                                    <p className="animate-in text-[10px] font-bold text-red-500 fade-in slide-in-from-top-1">
-                                                        {
-                                                            cloudflareForm
-                                                                .errors.zone_id
+                                                        onChange={(e) =>
+                                                            cloudflareForm.setData(
+                                                                'api_token',
+                                                                e.target.value,
+                                                            )
                                                         }
-                                                    </p>
-                                                )}
-                                            </div>
-                                        </div>
+                                                    />
+                                                    {cloudflareForm.errors
+                                                        .api_token && (
+                                                        <p className="animate-in text-[10px] font-bold text-red-500 fade-in slide-in-from-top-1">
+                                                            {
+                                                                cloudflareForm
+                                                                    .errors
+                                                                    .api_token
+                                                            }
+                                                        </p>
+                                                    )}
 
-                                        <div className="flex items-center justify-end border-t border-border/50 pt-6">
-                                            <Button
-                                                disabled={
-                                                    cloudflareForm.processing
-                                                }
-                                                className="h-11 rounded-xl px-8 text-xs font-black tracking-widest uppercase shadow-xl shadow-primary/10 transition-all hover:shadow-primary/20"
-                                            >
-                                                {cloudflareForm.processing ? (
-                                                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                                                ) : (
-                                                    <Zap className="mr-2 size-3.5 fill-current" />
-                                                )}
-                                                Save Integration
-                                            </Button>
-                                        </div>
-                                    </form>
-                                </CardContent>
-                            </Card>
-
-                            <Card className="lg:col-span-5">
-                                <CardHeader>
-                                    <div className="flex items-center gap-2">
-                                        <div className="rounded-lg border border-primary/20 bg-primary/10 p-1.5 text-primary">
-                                            <Info className="h-4 w-4" />
-                                        </div>
-                                        <h4 className="text-xs font-black tracking-wider text-foreground uppercase">
-                                            Setup Instructions
-                                        </h4>
-                                    </div>
-                                </CardHeader>
-                                <CardContent className="p-6">
-                                    <div className="space-y-6">
-                                        <div className="space-y-4">
-                                            {[
-                                                {
-                                                    step: 1,
-                                                    text: (
-                                                        <>
-                                                            Go to{' '}
-                                                            <a
-                                                                href="https://dash.cloudflare.com/profile/api-tokens"
-                                                                target="_blank"
-                                                                className="font-bold text-primary hover:underline"
-                                                            >
-                                                                Cloudflare API
-                                                                Tokens
-                                                            </a>
-                                                        </>
-                                                    ),
-                                                },
-                                                {
-                                                    step: 2,
-                                                    text: 'Create a token using the "Edit Zone DNS" template or a custom one.',
-                                                },
-                                                {
-                                                    step: 3,
-                                                    text: 'Ensure you add all 4 permissions listed on the left.',
-                                                },
-                                                {
-                                                    step: 4,
-                                                    text: 'Select "All Zones" or your specific domain in Zone Resources.',
-                                                },
-                                            ].map((item, i) => (
-                                                <div
-                                                    key={i}
-                                                    className="flex gap-4"
-                                                >
-                                                    <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-primary/20 bg-primary/10 text-[10px] font-black text-primary">
-                                                        {item.step}
+                                                    <div className="space-y-3 rounded-xl border border-border bg-muted/30 p-4">
+                                                        <div className="flex items-center gap-2 text-[10px] font-black tracking-widest text-foreground uppercase">
+                                                            <Lock className="size-3 text-primary" />
+                                                            Required Token
+                                                            Permissions
+                                                        </div>
+                                                        <div className="grid grid-cols-1 gap-2">
+                                                            {[
+                                                                {
+                                                                    p: 'Zone.Zone',
+                                                                    l: 'Read',
+                                                                    desc: 'Basic zone info',
+                                                                },
+                                                                {
+                                                                    p: 'Zone.Settings',
+                                                                    l: 'Edit',
+                                                                    desc: 'Attack mode & WAF',
+                                                                },
+                                                                {
+                                                                    p: 'Zone.Analytics',
+                                                                    l: 'Read',
+                                                                    desc: 'Traffic metrics',
+                                                                },
+                                                                {
+                                                                    p: 'Zone.Firewall Services',
+                                                                    l: 'Edit',
+                                                                    desc: 'IP & Firewall rules',
+                                                                },
+                                                            ].map((perm, i) => (
+                                                                <div
+                                                                    key={i}
+                                                                    className="flex flex-col gap-0.5 rounded-lg border border-border/50 bg-background/50 p-2"
+                                                                >
+                                                                    <div className="flex items-center justify-between">
+                                                                        <code className="text-[9px] font-bold text-primary">
+                                                                            {
+                                                                                perm.p
+                                                                            }
+                                                                        </code>
+                                                                        <Badge
+                                                                            variant="outline"
+                                                                            className="h-3.5 bg-primary/5 px-1 text-[8px] font-black"
+                                                                        >
+                                                                            {
+                                                                                perm.l
+                                                                            }
+                                                                        </Badge>
+                                                                    </div>
+                                                                    <span className="text-[8px] font-medium text-muted-foreground">
+                                                                        {
+                                                                            perm.desc
+                                                                        }
+                                                                    </span>
+                                                                </div>
+                                                            ))}
+                                                        </div>
                                                     </div>
-                                                    <p className="pt-0.5 text-[11px] leading-relaxed font-medium text-muted-foreground">
-                                                        {item.text}
-                                                    </p>
                                                 </div>
-                                            ))}
-                                        </div>
 
-                                        <div className="rounded-xl border border-border bg-muted/30 p-4">
-                                            <div className="mb-2 flex items-center gap-2">
-                                                <AlertCircle className="size-3 text-primary" />
-                                                <span className="text-[9px] font-black tracking-widest text-primary uppercase">
-                                                    Important Note
-                                                </span>
+                                                <div className="space-y-3">
+                                                    <Label
+                                                        htmlFor="zone_id"
+                                                        className="text-[10px] font-black tracking-widest text-muted-foreground uppercase"
+                                                    >
+                                                        Zone ID
+                                                    </Label>
+                                                    <Input
+                                                        id="zone_id"
+                                                        placeholder="Enter your Cloudflare Zone ID"
+                                                        className={`h-11 border-border bg-muted/50 font-mono text-xs focus:ring-primary/20 ${cloudflareForm.errors.zone_id ? 'border-red-500 ring-1 ring-red-500/20' : ''}`}
+                                                        value={
+                                                            cloudflareForm.data
+                                                                .zone_id
+                                                        }
+                                                        onChange={(e) =>
+                                                            cloudflareForm.setData(
+                                                                'zone_id',
+                                                                e.target.value,
+                                                            )
+                                                        }
+                                                    />
+                                                    {cloudflareForm.errors
+                                                        .zone_id && (
+                                                        <p className="animate-in text-[10px] font-bold text-red-500 fade-in slide-in-from-top-1">
+                                                            {
+                                                                cloudflareForm
+                                                                    .errors
+                                                                    .zone_id
+                                                            }
+                                                        </p>
+                                                    )}
+                                                </div>
                                             </div>
-                                            <p className="text-[10px] leading-relaxed text-muted-foreground">
-                                                Laraowl requires{' '}
-                                                <strong>Global</strong> or{' '}
-                                                <strong>Specific Zone</strong>{' '}
-                                                access. If the connection fails,
-                                                verify that your token hasn't
-                                                expired and the Zone ID matches
-                                                exactly.
-                                            </p>
+
+                                            <div className="flex items-center justify-end border-t border-border/50 pt-6">
+                                                <Button
+                                                    disabled={
+                                                        cloudflareForm.processing
+                                                    }
+                                                    className="h-11 rounded-xl px-8 text-xs font-black tracking-widest uppercase shadow-xl shadow-primary/10 transition-all hover:shadow-primary/20"
+                                                >
+                                                    {cloudflareForm.processing ? (
+                                                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                                    ) : (
+                                                        <Zap className="mr-2 size-3.5 fill-current" />
+                                                    )}
+                                                    Save Integration
+                                                </Button>
+                                            </div>
+                                        </form>
+                                    </CardContent>
+                                </Card>
+
+                                <Card className="lg:col-span-5">
+                                    <CardHeader>
+                                        <div className="flex items-center gap-2">
+                                            <div className="rounded-lg border border-primary/20 bg-primary/10 p-1.5 text-primary">
+                                                <Info className="h-4 w-4" />
+                                            </div>
+                                            <h4 className="text-xs font-black tracking-wider text-foreground uppercase">
+                                                Setup Instructions
+                                            </h4>
                                         </div>
-                                    </div>
-                                </CardContent>
-                            </Card>
-                        </div>
+                                    </CardHeader>
+                                    <CardContent className="p-6">
+                                        <div className="space-y-6">
+                                            <div className="space-y-4">
+                                                {[
+                                                    {
+                                                        step: 1,
+                                                        text: (
+                                                            <>
+                                                                Go to{' '}
+                                                                <a
+                                                                    href="https://dash.cloudflare.com/profile/api-tokens"
+                                                                    target="_blank"
+                                                                    className="font-bold text-primary hover:underline"
+                                                                >
+                                                                    Cloudflare
+                                                                    API Tokens
+                                                                </a>
+                                                            </>
+                                                        ),
+                                                    },
+                                                    {
+                                                        step: 2,
+                                                        text: 'Create a token using the "Edit Zone DNS" template or a custom one.',
+                                                    },
+                                                    {
+                                                        step: 3,
+                                                        text: 'Ensure you add all 4 permissions listed on the left.',
+                                                    },
+                                                    {
+                                                        step: 4,
+                                                        text: 'Select "All Zones" or your specific domain in Zone Resources.',
+                                                    },
+                                                ].map((item, i) => (
+                                                    <div
+                                                        key={i}
+                                                        className="flex gap-4"
+                                                    >
+                                                        <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-primary/20 bg-primary/10 text-[10px] font-black text-primary">
+                                                            {item.step}
+                                                        </div>
+                                                        <p className="pt-0.5 text-[11px] leading-relaxed font-medium text-muted-foreground">
+                                                            {item.text}
+                                                        </p>
+                                                    </div>
+                                                ))}
+                                            </div>
+
+                                            <div className="rounded-xl border border-border bg-muted/30 p-4">
+                                                <div className="mb-2 flex items-center gap-2">
+                                                    <AlertCircle className="size-3 text-primary" />
+                                                    <span className="text-[9px] font-black tracking-widest text-primary uppercase">
+                                                        Important Note
+                                                    </span>
+                                                </div>
+                                                <p className="text-[10px] leading-relaxed text-muted-foreground">
+                                                    Laraowl requires{' '}
+                                                    <strong>Global</strong> or{' '}
+                                                    <strong>
+                                                        Specific Zone
+                                                    </strong>{' '}
+                                                    access. If the connection
+                                                    fails, verify that your
+                                                    token hasn't expired and the
+                                                    Zone ID matches exactly.
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </CardContent>
+                                </Card>
+                            </div>
+                        )}
                     </TabsContent>
                 </Tabs>
             </div>

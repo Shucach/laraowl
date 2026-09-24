@@ -7,6 +7,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Project;
 use App\Models\Team;
 use App\Services\CloudflareService;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 
 class ProjectController extends Controller
@@ -83,6 +84,7 @@ class ProjectController extends Controller
             $settings['cloudflare'] = [
                 'api_token' => $request->api_token,
                 'zone_id' => $request->zone_id,
+                'connected_at' => now()->toIso8601String(),
             ];
 
             $project->settings = $settings;
@@ -94,6 +96,17 @@ class ProjectController extends Controller
 
             return back()->withErrors(['api_token' => 'An unexpected error occurred while saving.'])->withInput();
         }
+    }
+
+    public function disconnectCloudflare(Team $current_team, Project $project): RedirectResponse
+    {
+        $settings = $project->settings ?? [];
+        unset($settings['cloudflare']);
+
+        $project->settings = $settings;
+        $project->save();
+
+        return back()->with('success', 'Cloudflare integration disconnected.');
     }
 
     public function store(Request $request, Team $current_team, CreateProject $createProject)
