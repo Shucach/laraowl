@@ -1,10 +1,7 @@
-import { Head, Link, usePage, router } from '@inertiajs/react';
+import { Head, usePage, router } from '@inertiajs/react';
 import {
     Shield,
     Activity,
-    Filter,
-    List,
-    LayoutGrid,
     Globe,
     User,
     Terminal,
@@ -17,6 +14,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Icon } from '@/components/ui/icon';
 import AppLayout from '@/layouts/app-layout';
 import { ConnectCloudflare } from './components/connect-cloudflare';
+import { FirewallNav } from './components/firewall-nav';
 
 const Sparkline = ({ data, color }: { data: number[]; color: string }) => (
     <div className="h-6 w-16">
@@ -121,30 +119,6 @@ export default function FirewallTraffic({
     const projectSlug =
         props.currentProject?.slug || props.current_project?.slug;
 
-    const navItems = [
-        {
-            title: 'Overview',
-            href: `/${teamSlug}/${projectSlug}/firewall`,
-            icon: LayoutGrid,
-        },
-        {
-            title: 'Traffic',
-            href: `/${teamSlug}/${projectSlug}/firewall/traffic`,
-            icon: Activity,
-            active: true,
-        },
-        {
-            title: 'Rules',
-            href: `/${teamSlug}/${projectSlug}/firewall/rules`,
-            icon: Filter,
-        },
-        {
-            title: 'Audit Log',
-            href: `/${teamSlug}/${projectSlug}/firewall/audit`,
-            icon: List,
-        },
-    ];
-
     const blockIp = (ip: string) => {
         if (confirm(`Are you sure you want to block ${ip}?`)) {
             router.post(
@@ -163,23 +137,7 @@ export default function FirewallTraffic({
             <Head title="Traffic Analysis" />
 
             <div className="animate-in space-y-8 duration-700 fade-in">
-                {/* Secondary Nav */}
-                <div className="flex items-center gap-1 border-b border-border/50 pb-4">
-                    {navItems.map((item) => (
-                        <Link
-                            key={item.title}
-                            href={item.href}
-                            className={`flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-bold transition-all ${
-                                item.active
-                                    ? 'border border-primary/20 bg-primary/10 text-primary'
-                                    : 'text-muted-foreground hover:bg-muted hover:text-foreground'
-                            }`}
-                        >
-                            <item.icon className="size-3.5" />
-                            {item.title}
-                        </Link>
-                    ))}
-                </div>
+                <FirewallNav active="traffic" />
 
                 {!isConfigured ? (
                     <ConnectCloudflare />

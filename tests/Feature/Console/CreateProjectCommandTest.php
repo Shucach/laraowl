@@ -23,7 +23,7 @@ test('a project is created with the team owner as default alert email', function
         ->and($project->api_token)->not->toBeNull()
         ->and($project->integrations)->toHaveCount(1)
         ->and($project->integrations->first()->data['email'])->toBe('owner@example.com')
-        ->and($project->alertRules)->toHaveCount(4);
+        ->and($project->alertRules)->toHaveCount(5);
 });
 
 test('the default alert email can be overridden with --email', function () {

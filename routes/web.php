@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Projects\AlertRuleController;
+use App\Http\Controllers\Projects\AutoAttackModeController;
 use App\Http\Controllers\Projects\FirewallController;
 use App\Http\Controllers\Projects\IntegrationController;
 use App\Http\Controllers\Projects\IssueController;
@@ -93,10 +94,12 @@ Route::prefix('{current_team}/{project}')
         Route::get('firewall/traffic', [FirewallController::class, 'traffic'])->name('firewall.traffic');
         Route::get('firewall/rules', [FirewallController::class, 'rules'])->name('firewall.rules');
         Route::get('firewall/audit', [FirewallController::class, 'audit'])->name('firewall.audit');
+        Route::get('firewall/auto-attack-mode', [AutoAttackModeController::class, 'show'])->name('firewall.auto-attack-mode');
 
         // Firewall Actions
         Route::patch('firewall/settings', [FirewallController::class, 'updateSettings'])->name('firewall.settings.update');
         Route::post('firewall/attack-mode', [FirewallController::class, 'toggleAttackMode'])->name('firewall.attack-mode.toggle');
+        Route::patch('firewall/auto-attack-mode', [AutoAttackModeController::class, 'update'])->name('firewall.auto-attack-mode.update');
         Route::post('firewall/rules/ip', [FirewallController::class, 'storeIpRule'])->name('firewall.rules.ip.store');
         Route::delete('firewall/rules/ip/{rule_index}', [FirewallController::class, 'destroyIpRule'])->name('firewall.rules.ip.destroy');
 

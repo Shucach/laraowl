@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\AlertRule;
 use App\Models\Issue;
 use App\Models\Project;
+use Carbon\CarbonInterface;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 
@@ -139,6 +140,64 @@ class AlertService
         foreach ($rules as $rule) {
             $this->dispatchAlert($rule, $title, $message, $fields, $url);
         }
+    }
+
+    /**
+     * Notify about Under Attack Mode being switched automatically.
+     *
+     * @param  array<string, mixed>  $metrics
+     */
+    public function notifyAttackModeChanged(Project $project, bool $enabled, string $reason, array $metrics, CarbonInterface $at): void
+    {
+        $title = $enabled
+            ? '🛡️ Under Attack Mode enabled automatically'
+            : '✅ Under Attack Mode disabled automatically';
+        $message = $reason;
+        $url = $project->dashboardUrl();
+        $fields = [
+            'Project' => $project->name,
+            'Time' => $at->toDateTimeString().' '.$at->getTimezone()->getName(),
+        ];
+
+        foreach ($metrics as $name => $value) {
+            if ($value !== null && ! is_array($value)) {
+                $fields[str($name)->headline()->toString()] = $value;
+            }
+        }
+
+        foreach ($this->enabledRules($project, 'attack_mode') as $rule) {
+            $this->dispatchAlert($rule, $title, $message.' ('.$at->toIso8601String().')', $fields, $url);
+        }
+    }
+
+    /**
+     * Notify that attack mode automation could not act.
+     *
+     * The message is kept stable so repeated failures are throttled per rule.
+     */
+    public function notifyAttackModeFailed(Project $project, string $error): void
+    {
+        $title = '⚠️ Attack Mode automation failed';
+        $url = $project->dashboardUrl();
+        $fields = [
+            'Project' => $project->name,
+        ];
+
+        foreach ($this->enabledRules($project, 'attack_mode') as $rule) {
+            $this->dispatchAlert($rule, $title, $error, $fields, $url);
+        }
+    }
+
+    /**
+     * @return Collection<int, AlertRule>
+     */
+    protected function enabledRules(Project $project, string $eventType)
+    {
+        return $project->alertRules()
+            ->where('event_type', $eventType)
+            ->where('is_enabled', true)
+            ->with('integrations')
+            ->get();
     }
 
     /**

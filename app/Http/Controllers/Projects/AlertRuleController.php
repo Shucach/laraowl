@@ -21,6 +21,7 @@ class AlertRuleController extends Controller
                 ['id' => 'success_rate_drop', 'name' => 'Success Rate Drop', 'description' => 'Alert when success rate falls below a threshold'],
                 ['id' => 'high_latency', 'name' => 'High Latency', 'description' => 'Alert when average response time exceeds a threshold'],
                 ['id' => 'daily_summary', 'name' => 'Daily Summary', 'description' => 'Send a summary of activity every 24 hours'],
+                ['id' => 'attack_mode', 'name' => 'Attack Mode Changes', 'description' => 'Alert when Auto Attack Mode switches Under Attack Mode or fails to act'],
             ],
         ]);
     }

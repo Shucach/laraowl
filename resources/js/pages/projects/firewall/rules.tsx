@@ -1,14 +1,5 @@
-import { Head, Link, usePage, router } from '@inertiajs/react';
-import {
-    Activity,
-    Filter,
-    List,
-    LayoutGrid,
-    Shield,
-    Plus,
-    Trash2,
-    X,
-} from 'lucide-react';
+import { Head, usePage, router } from '@inertiajs/react';
+import { Shield, Plus, Trash2, X } from 'lucide-react';
 import { useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -17,6 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import AppLayout from '@/layouts/app-layout';
 import { ConnectCloudflare } from './components/connect-cloudflare';
+import { FirewallNav } from './components/firewall-nav';
 
 const RuleRow = ({
     name,
@@ -79,30 +71,6 @@ export default function FirewallRules({
     const [ipNote, setIpNote] = useState('');
     const [isSubmitting, setIsSubmitting] = useState(false);
 
-    const navItems = [
-        {
-            title: 'Overview',
-            href: `/${teamSlug}/${projectSlug}/firewall`,
-            icon: LayoutGrid,
-        },
-        {
-            title: 'Traffic',
-            href: `/${teamSlug}/${projectSlug}/firewall/traffic`,
-            icon: Activity,
-        },
-        {
-            title: 'Rules',
-            href: `/${teamSlug}/${projectSlug}/firewall/rules`,
-            icon: Filter,
-            active: true,
-        },
-        {
-            title: 'Audit Log',
-            href: `/${teamSlug}/${projectSlug}/firewall/audit`,
-            icon: List,
-        },
-    ];
-
     const updateSetting = (key: string, value: any) => {
         router.patch(
             `/${teamSlug}/${projectSlug}/firewall/settings`,
@@ -163,23 +131,7 @@ export default function FirewallRules({
             <Head title="Firewall Rules" />
 
             <div className="animate-in space-y-8 duration-700 fade-in">
-                {/* Secondary Nav */}
-                <div className="flex items-center gap-1 border-b border-border/50 pb-4">
-                    {navItems.map((item) => (
-                        <Link
-                            key={item.title}
-                            href={item.href}
-                            className={`flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-bold transition-all ${
-                                item.active
-                                    ? 'border border-primary/20 bg-primary/10 text-primary'
-                                    : 'text-muted-foreground hover:bg-muted hover:text-foreground'
-                            }`}
-                        >
-                            <item.icon className="size-3.5" />
-                            {item.title}
-                        </Link>
-                    ))}
-                </div>
+                <FirewallNav active="rules" />
 
                 {!isConfigured ? (
                     <ConnectCloudflare />

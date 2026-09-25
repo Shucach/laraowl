@@ -3,8 +3,10 @@
 namespace App\Http\Controllers\Projects;
 
 use App\Http\Controllers\Controller;
+use App\Models\AttackModeEvent;
 use App\Models\Project;
 use App\Models\Team;
+use App\Services\AttackModeService;
 use App\Services\CloudflareService;
 use App\Services\RecordService;
 use Illuminate\Http\Request;
@@ -50,12 +52,13 @@ class FirewallController extends Controller
      */
     private function firewallSettings(Project $project, bool $isConfigured): array
     {
-        $settings = $project->settings['firewall_settings'] ?? [
+        $settings = array_merge([
             'hotlink_protection' => true,
             'ddos_mitigation' => true,
             'browser_check' => true,
             'attack_mode' => false,
-        ];
+        ], $project->settings['firewall_settings'] ?? []);
+        unset($settings['attack_mode_state']);
 
         $securityLevel = $isConfigured ? $this->cloudflareService->getSecurityLevel($project) : null;
 
@@ -245,25 +248,16 @@ class FirewallController extends Controller
         return back()->with('success', 'Firewall settings updated.');
     }
 
-    public function toggleAttackMode(Request $request, Team $current_team, Project $project)
+    public function toggleAttackMode(Request $request, Team $current_team, Project $project, AttackModeService $attackModeService)
     {
         $enabled = $request->boolean('enabled');
-        \Log::info("Toggling Attack Mode for project: {$project->slug}, Team: {$current_team->slug}, Enabled: ".($enabled ? 'YES' : 'NO'));
+        $reason = ($enabled ? 'Enabled' : 'Disabled').' manually by '.$request->user()->name.'.';
 
-        $success = $this->cloudflareService->toggleAttackMode($project, $enabled);
-
-        if ($success) {
-            $settings = $project->settings ?? [];
-            $settings['firewall_settings']['attack_mode'] = $enabled;
-            $project->update(['settings' => $settings]);
-
+        if ($attackModeService->change($project, $enabled, AttackModeEvent::SOURCE_MANUAL, $reason)) {
             return back()->with('success', $enabled ? 'Attack mode enabled.' : 'Attack mode disabled.');
         }
 
-        $errorMsg = session('cloudflare_error', 'Failed to update Attack Mode on Cloudflare.');
-        \Log::error("Failed to toggle Attack Mode on Cloudflare for project: {$project->slug}. Error: $errorMsg");
-
-        return back()->withErrors(['error' => $errorMsg]);
+        return back()->withErrors(['error' => $attackModeService->state($project->fresh())['last_error'] ?? 'Failed to update Attack Mode on Cloudflare.']);
     }
 
     public function storeIpRule(Request $request, Team $current_team, Project $project)

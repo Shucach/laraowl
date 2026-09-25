@@ -181,6 +181,12 @@ export function AppSidebar() {
                     ),
                 },
                 {
+                    title: 'Auto Attack Mode',
+                    href: withPeriod(
+                        `/${teamSlug}/${projectSlug}/firewall/auto-attack-mode`,
+                    ),
+                },
+                {
                     title: 'Audit Log',
                     href: withPeriod(
                         `/${teamSlug}/${projectSlug}/firewall/audit`,

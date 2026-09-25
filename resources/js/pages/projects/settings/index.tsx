@@ -1629,6 +1629,9 @@ export default function ProjectSettings({
                                                     <SelectItem value="heartbeat_failed">
                                                         Heartbeat Missed (Jobs)
                                                     </SelectItem>
+                                                    <SelectItem value="attack_mode">
+                                                        Attack Mode Changes
+                                                    </SelectItem>
                                                 </SelectContent>
                                             </Select>
                                         </div>

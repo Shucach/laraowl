@@ -3,11 +3,28 @@
 namespace App\Services;
 
 use App\Models\Project;
+use Carbon\CarbonInterface;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 class CloudflareService
 {
+    /**
+     * Firewall actions counted as a mitigation (block or challenge).
+     */
+    public const MITIGATION_ACTIONS = ['block', 'challenge', 'jschallenge', 'managed_challenge'];
+
+    /**
+     * The error message of the last failed attack mode toggle.
+     */
+    protected ?string $lastError = null;
+
+    public function lastError(): ?string
+    {
+        return $this->lastError;
+    }
+
     public function isConfigured(Project $project): bool
     {
         $settings = $project->settings['cloudflare'] ?? [];
@@ -283,8 +300,11 @@ class CloudflareService
         $settings = $project->settings['cloudflare'] ?? [];
         $token = $settings['api_token'] ?? null;
         $zoneId = $settings['zone_id'] ?? null;
+        $this->lastError = null;
 
         if (! $token || ! $zoneId) {
+            $this->lastError = 'Cloudflare is not connected.';
+
             return false;
         }
 
@@ -298,12 +318,14 @@ class CloudflareService
                 $error = $response->json();
                 $msg = $error['errors'][0]['message'] ?? 'Unauthorized/Unknown Error';
                 Log::error('Cloudflare Attack Mode Toggle Failed: '.$response->body());
-                session()->flash('cloudflare_error', "Cloudflare Error: $msg. Please ensure your API Token has 'Zone.Settings: Edit' permission.");
+                $this->lastError = "Cloudflare Error: $msg. Please ensure your API Token has 'Zone.Settings: Edit' permission.";
+                session()->flash('cloudflare_error', $this->lastError);
             }
 
             return $response->successful();
         } catch (\Exception $e) {
             Log::error('Cloudflare Attack Mode Error: '.$e->getMessage());
+            $this->lastError = 'Cloudflare Error: '.$e->getMessage();
 
             return false;
         }
@@ -385,6 +407,160 @@ GQL;
 
             return [];
         }
+    }
+
+    /**
+     * Per-minute edge request counts and block/challenge firewall events.
+     *
+     * Adaptive group counts are already adjusted for Cloudflare's sampling.
+     * Challenges issued by the security level itself (Under Attack Mode) are
+     * excluded, otherwise an active mode would keep its own threat ratio high.
+     * Returns null when the data cannot be read, so callers can tell an
+     * outage apart from a quiet zone.
+     *
+     * @return array{requests: array<string, int>, firewall: array<string, array{count: int, ips: array<int, string>}>}|null
+     */
+    public function getMinuteTraffic(Project $project, CarbonInterface $since, CarbonInterface $until): ?array
+    {
+        $query = <<<'GQL'
+        query ($zoneTag: string, $since: Time, $until: Time, $actions: [string!]) {
+          viewer {
+            zones(filter: { zoneTag: $zoneTag }) {
+              requests: httpRequestsAdaptiveGroups(
+                limit: 1000
+                filter: { datetime_geq: $since, datetime_lt: $until }
+                orderBy: [datetimeMinute_ASC]
+              ) {
+                count
+                dimensions { datetimeMinute }
+              }
+              firewall: firewallEventsAdaptiveGroups(
+                limit: 10000
+                filter: { datetime_geq: $since, datetime_lt: $until, action_in: $actions, source_neq: "securitylevel" }
+                orderBy: [datetimeMinute_ASC]
+              ) {
+                count
+                dimensions { datetimeMinute clientIP }
+              }
+            }
+          }
+        }
+GQL;
+
+        $zone = $this->graphql($project, $query, [
+            'since' => $since->copy()->utc()->toIso8601ZuluString(),
+            'until' => $until->copy()->utc()->toIso8601ZuluString(),
+            'actions' => self::MITIGATION_ACTIONS,
+        ]);
+
+        if ($zone === null) {
+            return null;
+        }
+
+        $requests = [];
+        foreach ($zone['requests'] ?? [] as $group) {
+            $minute = $this->minuteKey($group['dimensions']['datetimeMinute']);
+            $requests[$minute] = ($requests[$minute] ?? 0) + (int) $group['count'];
+        }
+
+        $firewall = [];
+        foreach ($zone['firewall'] ?? [] as $group) {
+            $minute = $this->minuteKey($group['dimensions']['datetimeMinute']);
+            $firewall[$minute] ??= ['count' => 0, 'ips' => []];
+            $firewall[$minute]['count'] += (int) $group['count'];
+            $firewall[$minute]['ips'][] = (string) ($group['dimensions']['clientIP'] ?? '');
+        }
+
+        foreach ($firewall as $minute => $bucket) {
+            $firewall[$minute]['ips'] = array_values(array_unique($bucket['ips']));
+        }
+
+        return ['requests' => $requests, 'firewall' => $firewall];
+    }
+
+    /**
+     * Per-minute edge request counts, used to build the traffic baseline.
+     *
+     * @return array<string, int>|null
+     */
+    public function getMinuteRequestCounts(Project $project, CarbonInterface $since, CarbonInterface $until): ?array
+    {
+        $query = <<<'GQL'
+        query ($zoneTag: string, $since: Time, $until: Time) {
+          viewer {
+            zones(filter: { zoneTag: $zoneTag }) {
+              requests: httpRequestsAdaptiveGroups(
+                limit: 1500
+                filter: { datetime_geq: $since, datetime_lt: $until }
+                orderBy: [datetimeMinute_ASC]
+              ) {
+                count
+                dimensions { datetimeMinute }
+              }
+            }
+          }
+        }
+GQL;
+
+        $zone = $this->graphql($project, $query, [
+            'since' => $since->copy()->utc()->toIso8601ZuluString(),
+            'until' => $until->copy()->utc()->toIso8601ZuluString(),
+        ]);
+
+        if ($zone === null) {
+            return null;
+        }
+
+        $requests = [];
+        foreach ($zone['requests'] ?? [] as $group) {
+            $minute = $this->minuteKey($group['dimensions']['datetimeMinute']);
+            $requests[$minute] = ($requests[$minute] ?? 0) + (int) $group['count'];
+        }
+
+        return $requests;
+    }
+
+    /**
+     * Run a zone-scoped GraphQL query and return the zone node, or null on failure.
+     *
+     * @param  array<string, mixed>  $variables
+     * @return array<string, mixed>|null
+     */
+    protected function graphql(Project $project, string $query, array $variables): ?array
+    {
+        if (! $this->isConfigured($project)) {
+            return null;
+        }
+
+        $settings = $project->settings['cloudflare'];
+
+        try {
+            $response = Http::withToken($settings['api_token'])
+                ->post('https://api.cloudflare.com/client/v4/graphql', [
+                    'query' => $query,
+                    'variables' => ['zoneTag' => $settings['zone_id']] + $variables,
+                ]);
+
+            if (! $response->successful() || ! empty($response->json('errors'))) {
+                Log::error('Cloudflare GraphQL Request Failed: '.$response->body());
+
+                return null;
+            }
+
+            return $response->json('data.viewer.zones.0') ?? [];
+        } catch (\Exception $e) {
+            Log::error('Cloudflare GraphQL Exception: '.$e->getMessage());
+
+            return null;
+        }
+    }
+
+    /**
+     * Normalise a Cloudflare minute timestamp to an app-timezone minute key.
+     */
+    public function minuteKey(string $datetime): string
+    {
+        return Carbon::parse($datetime)->setTimezone(config('app.timezone'))->format('Y-m-d H:i');
     }
 
     protected function getAnalyticsQuery(string $zoneId, string $period): string

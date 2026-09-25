@@ -61,6 +61,11 @@ class CreateProject
                 'event_type' => 'heartbeat_failed',
                 'settings' => ['frequency' => 'immediate'],
             ],
+            [
+                'name' => 'Attack Mode Changes',
+                'event_type' => 'attack_mode',
+                'settings' => ['frequency' => 'immediate'],
+            ],
         ];
     }
 }

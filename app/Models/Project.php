@@ -149,6 +149,11 @@ class Project extends Model implements HasMedia
         return $this->hasMany(AlertRule::class);
     }
 
+    public function attackModeEvents(): HasMany
+    {
+        return $this->hasMany(AttackModeEvent::class);
+    }
+
     /**
      * Alias of {@see alertRules()} so scoped route binding of the `{rule}`
      * parameter resolves against this project.

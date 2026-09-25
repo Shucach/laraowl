@@ -13,5 +13,9 @@ Schedule::command('projects:check-health')
     ->everyThirtySeconds()
     ->withoutOverlapping(5)
     ->runInBackground();
+Schedule::command('firewall:auto-attack-mode')
+    ->everyMinute()
+    ->withoutOverlapping(5)
+    ->runInBackground();
 Schedule::command('model:prune')->daily();
 Schedule::command('laraowl:update --check')->daily();
