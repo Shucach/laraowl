@@ -249,6 +249,33 @@ class CloudflareService
     }
 
     /**
+     * Get the zone's current security level, or null when it cannot be read.
+     */
+    public function getSecurityLevel(Project $project): ?string
+    {
+        if (! $this->isConfigured($project)) {
+            return null;
+        }
+
+        $settings = $project->settings['cloudflare'];
+
+        try {
+            $response = Http::withToken($settings['api_token'])
+                ->get("https://api.cloudflare.com/client/v4/zones/{$settings['zone_id']}/settings/security_level");
+
+            if (! $response->successful()) {
+                return null;
+            }
+
+            return $response->json('result.value');
+        } catch (\Exception $e) {
+            Log::error('Cloudflare Security Level Fetch Error: '.$e->getMessage());
+
+            return null;
+        }
+    }
+
+    /**
      * Toggle Under Attack Mode.
      */
     public function toggleAttackMode(Project $project, bool $enabled): bool

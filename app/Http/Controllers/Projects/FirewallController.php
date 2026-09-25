@@ -39,13 +39,31 @@ class FirewallController extends Controller
             'timeSeries' => $isConfigured ? $this->getRealFirewallTimeSeries($project, $period) : [],
             'recentAlerts' => $this->getRecentAlerts($project),
             'rules' => $project->settings['firewall_rules'] ?? [],
-            'settings' => $project->settings['firewall_settings'] ?? [
-                'hotlink_protection' => true,
-                'ddos_mitigation' => true,
-                'browser_check' => true,
-                'attack_mode' => false,
-            ],
+            'settings' => $this->firewallSettings($project, $isConfigured),
         ]);
+    }
+
+    /**
+     * Stored firewall settings with attack mode synced from Cloudflare when available.
+     *
+     * @return array<string, mixed>
+     */
+    private function firewallSettings(Project $project, bool $isConfigured): array
+    {
+        $settings = $project->settings['firewall_settings'] ?? [
+            'hotlink_protection' => true,
+            'ddos_mitigation' => true,
+            'browser_check' => true,
+            'attack_mode' => false,
+        ];
+
+        $securityLevel = $isConfigured ? $this->cloudflareService->getSecurityLevel($project) : null;
+
+        if ($securityLevel !== null) {
+            $settings['attack_mode'] = $securityLevel === 'under_attack';
+        }
+
+        return $settings;
     }
 
     /**
@@ -77,12 +95,7 @@ class FirewallController extends Controller
         return Inertia::render('projects/firewall/rules', [
             'isConfigured' => $isConfigured,
             'rules' => $project->settings['firewall_rules'] ?? [],
-            'settings' => $project->settings['firewall_settings'] ?? [
-                'hotlink_protection' => true,
-                'ddos_mitigation' => true,
-                'browser_check' => true,
-                'attack_mode' => false,
-            ],
+            'settings' => $this->firewallSettings($project, $isConfigured),
         ]);
     }
 

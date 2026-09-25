@@ -1,4 +1,4 @@
-import { Head, Link, usePage } from '@inertiajs/react';
+import { Head, Link, usePage, router } from '@inertiajs/react';
 import {
     Shield,
     Lock as LockIcon,
@@ -107,6 +107,14 @@ export default function FirewallOverview({
             { mergeQuery: {} },
         );
 
+    const toggleAttackMode = () => {
+        router.post(
+            `/${teamSlug}/${projectSlug}/firewall/attack-mode`,
+            { enabled: !settings.attack_mode },
+            { preserveScroll: true },
+        );
+    };
+
     const navItems = [
         {
             title: 'Overview',
@@ -206,26 +214,22 @@ export default function FirewallOverview({
                                             Based on active security layers
                                         </p>
                                     </div>
-                                    <Link
-                                        href={`/${teamSlug}/${projectSlug}/firewall/rules`}
-                                        className="w-full"
+                                    <Button
+                                        onClick={toggleAttackMode}
+                                        variant={
+                                            settings.attack_mode
+                                                ? 'destructive'
+                                                : 'outline'
+                                        }
+                                        className="group h-10 w-full text-[10px] font-black tracking-widest uppercase"
                                     >
-                                        <Button
-                                            variant={
-                                                settings.attack_mode
-                                                    ? 'destructive'
-                                                    : 'outline'
-                                            }
-                                            className="group h-10 w-full text-[10px] font-black tracking-widest uppercase"
-                                        >
-                                            <Zap
-                                                className={`mr-2 size-3.5 ${settings.attack_mode ? 'fill-current' : ''}`}
-                                            />
-                                            {settings.attack_mode
-                                                ? 'Disable Attack Mode'
-                                                : 'Enable Attack Mode'}
-                                        </Button>
-                                    </Link>
+                                        <Zap
+                                            className={`mr-2 size-3.5 ${settings.attack_mode ? 'fill-current' : ''}`}
+                                        />
+                                        {settings.attack_mode
+                                            ? 'Disable Attack Mode'
+                                            : 'Enable Attack Mode'}
+                                    </Button>
                                 </CardContent>
                             </Card>
 

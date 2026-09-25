@@ -89,3 +89,43 @@ test('cloudflare can be disconnected while keeping other settings', function () 
     expect($settings)->not->toHaveKey('cloudflare')
         ->and($settings['firewall_rules'])->toBe([['id' => 'rule-1']]);
 });
+
+test('firewall rules page reflects the live cloudflare attack mode', function (string $securityLevel, bool $expected) {
+    Http::fake([
+        'api.cloudflare.com/client/v4/zones/zone-1/settings/security_level' => Http::response([
+            'success' => true,
+            'result' => ['id' => 'security_level', 'value' => $securityLevel],
+        ]),
+        'api.cloudflare.com/*' => Http::response(['success' => true]),
+    ]);
+
+    $user = User::factory()->create();
+    $project = cloudflareProject($user, [
+        'cloudflare' => ['api_token' => 'token', 'zone_id' => 'zone-1'],
+        'firewall_settings' => ['attack_mode' => ! $expected],
+    ]);
+
+    $this->actingAs($user)
+        ->get(projectRoute('firewall.rules', $project))
+        ->assertInertia(fn (Assert $page) => $page->where('settings.attack_mode', $expected));
+})->with([
+    'under attack' => ['under_attack', true],
+    'high' => ['high', false],
+]);
+
+test('firewall rules page falls back to stored attack mode when cloudflare is unreadable', function () {
+    Http::fake([
+        'api.cloudflare.com/client/v4/zones/zone-1/settings/security_level' => Http::response(['success' => false], 403),
+        'api.cloudflare.com/*' => Http::response(['success' => true]),
+    ]);
+
+    $user = User::factory()->create();
+    $project = cloudflareProject($user, [
+        'cloudflare' => ['api_token' => 'token', 'zone_id' => 'zone-1'],
+        'firewall_settings' => ['attack_mode' => true],
+    ]);
+
+    $this->actingAs($user)
+        ->get(projectRoute('firewall.rules', $project))
+        ->assertInertia(fn (Assert $page) => $page->where('settings.attack_mode', true));
+});
