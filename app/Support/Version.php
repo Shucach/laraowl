@@ -13,7 +13,7 @@ class Version
      * --strict warns against for packages, and which isn't authoritative
      * once someone patches the code without re-tagging).
      */
-    const CURRENT = '1.1.2';
+    const CURRENT = '1.1.3';
 
     /**
      * Get the version this instance of LaraOwl is running.
