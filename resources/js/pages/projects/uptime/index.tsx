@@ -230,6 +230,12 @@ export default function UptimeIndex({ checks, uptime_stats, period }: any) {
                                                         DOWN
                                                     </Badge>
                                                 )}
+                                                {check.status === 'up' &&
+                                                    check.error && (
+                                                        <span className="text-[9px] font-bold tracking-widest text-muted-foreground uppercase">
+                                                            {check.error}
+                                                        </span>
+                                                    )}
                                             </div>
                                         </td>
                                         <td className="px-6 py-4">

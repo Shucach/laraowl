@@ -8,6 +8,7 @@ use App\Services\AlertService;
 use App\Services\IntegrationService;
 use Illuminate\Console\Command;
 use Illuminate\Http\Client\Pool;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 
@@ -65,8 +66,11 @@ class CheckProjectUptime extends Command
             $batch = $batch->values();
             $start = microtime(true);
 
+            // A Cloudflare challenge will not pass on retry, so only retry real failures
             $responses = Http::pool(fn (Pool $pool) => $batch->map(
-                fn (Project $project) => $pool->retry(2, 1000, throw: false)->timeout(10)->get($project->url)
+                fn (Project $project) => $pool->retry(2, 1000, fn (\Throwable $exception) => ! (
+                    $exception instanceof RequestException && $this->isCloudflareChallenge($exception->response)
+                ), throw: false)->timeout(10)->get($project->url)
             )->all());
 
             foreach ($batch as $index => $project) {
@@ -87,7 +91,9 @@ class CheckProjectUptime extends Command
         } else {
             $statusCode = $response->status();
 
-            if ($response->failed()) {
+            if ($this->isCloudflareChallenge($response)) {
+                $error = 'Cloudflare challenge';
+            } elseif ($response->failed()) {
                 $status = 'down';
                 $error = "HTTP error status: {$statusCode}";
             }
@@ -123,6 +129,23 @@ class CheckProjectUptime extends Command
             $this->info("Project {$project->name} is back UP.");
             $this->notifyRecovery($project, $alertService);
         }
+    }
+
+    /**
+     * Determine if the response is a Cloudflare challenge page ("I'm Under Attack" mode, managed challenge).
+     *
+     * The challenge is served by the Cloudflare edge to every automated client,
+     * so the site is reachable and must not be reported as down.
+     */
+    protected function isCloudflareChallenge(Response $response): bool
+    {
+        if ($response->header('cf-mitigated') === 'challenge') {
+            return true;
+        }
+
+        return in_array($response->status(), [403, 503], true)
+            && str_contains(strtolower($response->header('Server')), 'cloudflare')
+            && str_contains($response->body(), '_cf_chl_opt');
     }
 
     protected function checkHeartbeats(AlertService $alertService): void

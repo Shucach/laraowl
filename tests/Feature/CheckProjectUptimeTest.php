@@ -167,6 +167,88 @@ test('it logs down and sends alert when all attempts fail', function () {
     expect($project->uptimeChecks->first()->status)->toBe('down');
 });
 
+test('it logs up without retrying when cloudflare serves a challenge', function (int $status, array $headers, string $body) {
+    $team = Team::factory()->create();
+    $project = Project::factory()->create([
+        'team_id' => $team->id,
+        'url' => 'https://example.com',
+        'last_uptime_status' => 'up',
+    ]);
+
+    Http::fake([
+        '*' => Http::response($body, $status, $headers),
+    ]);
+
+    $alertService = Mockery::mock(AlertService::class);
+    $alertService->shouldNotReceive('notifyUptimeDown');
+    $this->instance(AlertService::class, $alertService);
+
+    $this->artisan('projects:check-health')
+        ->assertExitCode(0);
+
+    Http::assertSentCount(1);
+
+    $project->refresh();
+    $check = $project->uptimeChecks->first();
+    expect($project->last_uptime_status)->toBe('up');
+    expect($check->status)->toBe('up');
+    expect($check->status_code)->toBe($status);
+    expect($check->error)->toBe('Cloudflare challenge');
+})->with([
+    'under attack mode' => [503, ['Server' => 'cloudflare', 'cf-mitigated' => 'challenge'], '<title>Just a moment...</title>'],
+    'managed challenge' => [403, ['Server' => 'cloudflare', 'cf-mitigated' => 'challenge'], '<title>Just a moment...</title>'],
+    'challenge page without header' => [503, ['Server' => 'cloudflare'], '<script>window._cf_chl_opt={cType: "managed"};</script>'],
+]);
+
+test('it still logs down for real errors served through cloudflare', function () {
+    $team = Team::factory()->create();
+    $project = Project::factory()->create([
+        'team_id' => $team->id,
+        'url' => 'https://example.com',
+        'last_uptime_status' => 'up',
+    ]);
+
+    Http::fake([
+        '*' => Http::response('Service Unavailable <script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script>', 503, ['Server' => 'cloudflare']),
+    ]);
+
+    $alertService = Mockery::mock(AlertService::class);
+    $alertService->shouldReceive('notifyUptimeDown')->once();
+    $this->instance(AlertService::class, $alertService);
+
+    $this->artisan('projects:check-health')
+        ->assertExitCode(0);
+
+    Http::assertSentCount(2);
+
+    $project->refresh();
+    expect($project->last_uptime_status)->toBe('down');
+    expect($project->uptimeChecks->first()->error)->toBe('HTTP error status: 503');
+});
+
+test('it recovers to up when a down site switches to a cloudflare challenge', function () {
+    $team = Team::factory()->create();
+    $project = Project::factory()->create([
+        'team_id' => $team->id,
+        'url' => 'https://example.com',
+        'last_uptime_status' => 'down',
+    ]);
+
+    Http::fake([
+        '*' => Http::response('<title>Just a moment...</title>', 503, ['Server' => 'cloudflare', 'cf-mitigated' => 'challenge']),
+    ]);
+
+    $alertService = Mockery::mock(AlertService::class);
+    $alertService->shouldNotReceive('notifyUptimeDown');
+    $this->instance(AlertService::class, $alertService);
+
+    $this->artisan('projects:check-health')
+        ->expectsOutputToContain('is back UP')
+        ->assertExitCode(0);
+
+    expect($project->refresh()->last_uptime_status)->toBe('up');
+});
+
 test('it checks multiple projects concurrently in a single run', function () {
     $team = Team::factory()->create();
     $projects = Project::factory()->count(3)->sequence(
