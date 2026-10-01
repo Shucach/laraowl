@@ -30,6 +30,11 @@ class FakeCloudflareZone
 
     public bool $analyticsFails = false;
 
+    /** Deny firewallEventsAdaptiveGroups like a Free plan zone. */
+    public bool $firewallGroupsDenied = false;
+
+    public int $deniedQueries = 0;
+
     public int $patches = 0;
 
     /** @var array<string, int> */
@@ -75,12 +80,27 @@ class FakeCloudflareZone
                     return Http::response(['errors' => [['message' => 'unavailable']]], 500);
                 }
 
-                $isWindow = str_contains($request['query'], 'firewallEventsAdaptiveGroups');
+                $isGrouped = str_contains($request['query'], 'firewallEventsAdaptiveGroups');
+
+                if ($isGrouped && $this->firewallGroupsDenied) {
+                    $this->deniedQueries++;
+
+                    return Http::response(['data' => null, 'errors' => [[
+                        'message' => "zone 'zone-1' does not have access to the path",
+                        'path' => ['viewer', 'zones', '0', 'firewall'],
+                        'extensions' => ['code' => 'authz'],
+                    ]]]);
+                }
+
+                $isWindow = str_contains($request['query'], 'firewallEventsAdaptive');
                 $zone = ['requests' => $this->groups($isWindow ? $this->requests : $this->baseline)];
 
                 if ($isWindow) {
+                    // Raw events carry one sampled row per IP and minute, weighted by sampleInterval
                     $zone['firewall'] = collect($this->firewall)->flatMap(fn (array $ips, string $minute) => collect($ips)
-                        ->map(fn (int $count, string $ip) => ['count' => $count, 'dimensions' => ['datetimeMinute' => $this->iso($minute), 'clientIP' => $ip]])
+                        ->map(fn (int $count, string $ip) => $isGrouped
+                            ? ['count' => $count, 'dimensions' => ['datetimeMinute' => $this->iso($minute), 'clientIP' => $ip]]
+                            : ['datetime' => $this->iso($minute), 'clientIP' => $ip, 'sampleInterval' => $count])
                         ->values())->all();
                 }
 
@@ -393,6 +413,26 @@ test('a cloudflare firewall event spike enables attack mode', function (int $ips
     'from many IPs' => [12, 'under_attack'],
     'from too few IPs' => [9, 'high'],
 ]);
+
+test('zones without grouped firewall analytics fall back to raw firewall events', function () {
+    $project = autoAttackProject();
+    $this->zone->firewallGroupsDenied = true;
+    $this->zone->withBaseline(120, 5000);
+
+    runAutoAttackMode();
+
+    expect($this->zone->level)->toBe('high')
+        ->and($project->attackModeEvents()->count())->toBe(0);
+
+    $this->zone->requests[minuteKey(1)] = 5000;
+    $this->zone->firewall[minuteKey(1)] = collect(range(1, 12))->mapWithKeys(fn ($i) => ["7.7.7.{$i}" => 11])->all();
+
+    runAutoAttackMode();
+
+    expect($this->zone->level)->toBe('under_attack')
+        ->and(attackState($project)['attack_mode_state']['reason'])->toContain('132 Cloudflare block/challenge events from 12 IPs')
+        ->and($this->zone->deniedQueries)->toBe(1);
+});
 
 test('without enough baseline history only the absolute thresholds apply', function () {
     $project = autoAttackProject();

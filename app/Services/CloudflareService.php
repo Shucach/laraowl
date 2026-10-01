@@ -4,7 +4,9 @@ namespace App\Services;
 
 use App\Models\Project;
 use Carbon\CarbonInterface;
+use Illuminate\Http\Client\Response;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -418,22 +420,66 @@ GQL;
      * Returns null when the data cannot be read, so callers can tell an
      * outage apart from a quiet zone.
      *
+     * Zones without access to firewallEventsAdaptiveGroups (Free plan) fall
+     * back to raw firewallEventsAdaptive events, weighted by their sample
+     * interval. That dataset returns at most 10000 events, newest first.
+     *
      * @return array{requests: array<string, int>, firewall: array<string, array{count: int, ips: array<int, string>}>}|null
      */
     public function getMinuteTraffic(Project $project, CarbonInterface $since, CarbonInterface $until): ?array
     {
-        $query = <<<'GQL'
-        query ($zoneTag: string, $since: Time, $until: Time, $actions: [string!]) {
-          viewer {
-            zones(filter: { zoneTag: $zoneTag }) {
-              requests: httpRequestsAdaptiveGroups(
-                limit: 1000
-                filter: { datetime_geq: $since, datetime_lt: $until }
-                orderBy: [datetimeMinute_ASC]
-              ) {
-                count
-                dimensions { datetimeMinute }
-              }
+        $variables = [
+            'since' => $since->copy()->utc()->toIso8601ZuluString(),
+            'until' => $until->copy()->utc()->toIso8601ZuluString(),
+            'actions' => self::MITIGATION_ACTIONS,
+        ];
+
+        $groupsUnavailableKey = 'cloudflare_firewall_groups_unavailable_'.($project->settings['cloudflare']['zone_id'] ?? '');
+
+        if (! Cache::has($groupsUnavailableKey)) {
+            $response = $this->graphqlRequest($project, $this->minuteTrafficQuery(grouped: true), $variables);
+
+            if (! $this->deniesFirewallAccess($response)) {
+                $zone = $this->zoneFromResponse($response);
+
+                if ($zone === null) {
+                    return null;
+                }
+
+                $events = collect($zone['firewall'] ?? [])->map(fn (array $group) => [
+                    'datetime' => $group['dimensions']['datetimeMinute'],
+                    'ip' => (string) ($group['dimensions']['clientIP'] ?? ''),
+                    'count' => (int) $group['count'],
+                ]);
+
+                return ['requests' => $this->minuteRequestCounts($zone), 'firewall' => $this->firewallBuckets($events->all())];
+            }
+
+            Cache::put($groupsUnavailableKey, true, now()->addDay());
+        }
+
+        $zone = $this->graphql($project, $this->minuteTrafficQuery(grouped: false), $variables);
+
+        if ($zone === null) {
+            return null;
+        }
+
+        $events = collect($zone['firewall'] ?? [])->map(fn (array $event) => [
+            'datetime' => $event['datetime'],
+            'ip' => (string) ($event['clientIP'] ?? ''),
+            'count' => max(1, (int) ($event['sampleInterval'] ?? 1)),
+        ]);
+
+        return ['requests' => $this->minuteRequestCounts($zone), 'firewall' => $this->firewallBuckets($events->all())];
+    }
+
+    /**
+     * Edge requests plus firewall events, either as adaptive groups or as raw events.
+     */
+    protected function minuteTrafficQuery(bool $grouped): string
+    {
+        $firewall = $grouped
+            ? <<<'GQL'
               firewall: firewallEventsAdaptiveGroups(
                 limit: 10000
                 filter: { datetime_geq: $since, datetime_lt: $until, action_in: $actions, source_neq: "securitylevel" }
@@ -442,40 +488,83 @@ GQL;
                 count
                 dimensions { datetimeMinute clientIP }
               }
+GQL
+            : <<<'GQL'
+              firewall: firewallEventsAdaptive(
+                limit: 10000
+                filter: { datetime_geq: $since, datetime_lt: $until, action_in: $actions, source_neq: "securitylevel" }
+                orderBy: [datetime_DESC]
+              ) {
+                datetime
+                clientIP
+                sampleInterval
+              }
+GQL;
+
+        return <<<GQL
+        query (\$zoneTag: string, \$since: Time, \$until: Time, \$actions: [string!]) {
+          viewer {
+            zones(filter: { zoneTag: \$zoneTag }) {
+              requests: httpRequestsAdaptiveGroups(
+                limit: 1000
+                filter: { datetime_geq: \$since, datetime_lt: \$until }
+                orderBy: [datetimeMinute_ASC]
+              ) {
+                count
+                dimensions { datetimeMinute }
+              }
+        {$firewall}
             }
           }
         }
-GQL;
+        GQL;
+    }
 
-        $zone = $this->graphql($project, $query, [
-            'since' => $since->copy()->utc()->toIso8601ZuluString(),
-            'until' => $until->copy()->utc()->toIso8601ZuluString(),
-            'actions' => self::MITIGATION_ACTIONS,
-        ]);
+    /**
+     * Whether Cloudflare refused the firewall dataset for this zone's plan.
+     */
+    protected function deniesFirewallAccess(?Response $response): bool
+    {
+        return collect($response?->json('errors') ?? [])->contains(
+            fn (array $error) => ($error['extensions']['code'] ?? null) === 'authz'
+                && in_array('firewall', $error['path'] ?? [], true)
+        );
+    }
 
-        if ($zone === null) {
-            return null;
-        }
-
+    /**
+     * @param  array<string, mixed>  $zone
+     * @return array<string, int>
+     */
+    protected function minuteRequestCounts(array $zone): array
+    {
         $requests = [];
         foreach ($zone['requests'] ?? [] as $group) {
             $minute = $this->minuteKey($group['dimensions']['datetimeMinute']);
             $requests[$minute] = ($requests[$minute] ?? 0) + (int) $group['count'];
         }
 
+        return $requests;
+    }
+
+    /**
+     * @param  array<int, array{datetime: string, ip: string, count: int}>  $events
+     * @return array<string, array{count: int, ips: array<int, string>}>
+     */
+    protected function firewallBuckets(array $events): array
+    {
         $firewall = [];
-        foreach ($zone['firewall'] ?? [] as $group) {
-            $minute = $this->minuteKey($group['dimensions']['datetimeMinute']);
+        foreach ($events as $event) {
+            $minute = $this->minuteKey($event['datetime']);
             $firewall[$minute] ??= ['count' => 0, 'ips' => []];
-            $firewall[$minute]['count'] += (int) $group['count'];
-            $firewall[$minute]['ips'][] = (string) ($group['dimensions']['clientIP'] ?? '');
+            $firewall[$minute]['count'] += $event['count'];
+            $firewall[$minute]['ips'][] = $event['ip'];
         }
 
         foreach ($firewall as $minute => $bucket) {
             $firewall[$minute]['ips'] = array_values(array_unique($bucket['ips']));
         }
 
-        return ['requests' => $requests, 'firewall' => $firewall];
+        return $firewall;
     }
 
     /**
@@ -511,13 +600,7 @@ GQL;
             return null;
         }
 
-        $requests = [];
-        foreach ($zone['requests'] ?? [] as $group) {
-            $minute = $this->minuteKey($group['dimensions']['datetimeMinute']);
-            $requests[$minute] = ($requests[$minute] ?? 0) + (int) $group['count'];
-        }
-
-        return $requests;
+        return $this->minuteRequestCounts($zone);
     }
 
     /**
@@ -528,6 +611,16 @@ GQL;
      */
     protected function graphql(Project $project, string $query, array $variables): ?array
     {
+        return $this->zoneFromResponse($this->graphqlRequest($project, $query, $variables));
+    }
+
+    /**
+     * Send a zone-scoped GraphQL query, or return null when it cannot be sent.
+     *
+     * @param  array<string, mixed>  $variables
+     */
+    protected function graphqlRequest(Project $project, string $query, array $variables): ?Response
+    {
         if (! $this->isConfigured($project)) {
             return null;
         }
@@ -535,24 +628,36 @@ GQL;
         $settings = $project->settings['cloudflare'];
 
         try {
-            $response = Http::withToken($settings['api_token'])
+            return Http::withToken($settings['api_token'])
                 ->post('https://api.cloudflare.com/client/v4/graphql', [
                     'query' => $query,
                     'variables' => ['zoneTag' => $settings['zone_id']] + $variables,
                 ]);
-
-            if (! $response->successful() || ! empty($response->json('errors'))) {
-                Log::error('Cloudflare GraphQL Request Failed: '.$response->body());
-
-                return null;
-            }
-
-            return $response->json('data.viewer.zones.0') ?? [];
         } catch (\Exception $e) {
             Log::error('Cloudflare GraphQL Exception: '.$e->getMessage());
 
             return null;
         }
+    }
+
+    /**
+     * The zone node of a GraphQL response, or null when the request failed.
+     *
+     * @return array<string, mixed>|null
+     */
+    protected function zoneFromResponse(?Response $response): ?array
+    {
+        if ($response === null) {
+            return null;
+        }
+
+        if (! $response->successful() || ! empty($response->json('errors'))) {
+            Log::error('Cloudflare GraphQL Request Failed: '.$response->body());
+
+            return null;
+        }
+
+        return $response->json('data.viewer.zones.0') ?? [];
     }
 
     /**
