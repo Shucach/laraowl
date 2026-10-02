@@ -4,11 +4,15 @@ namespace App\Services;
 
 use App\Models\Project;
 use Carbon\CarbonInterface;
+use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
+use Throwable;
 
 class CloudflareService
 {
@@ -18,7 +22,17 @@ class CloudflareService
     public const MITIGATION_ACTIONS = ['block', 'challenge', 'jschallenge', 'managed_challenge'];
 
     /**
-     * The error message of the last failed attack mode toggle.
+     * Seconds a security level read may take before it is given up.
+     */
+    public const SECURITY_LEVEL_TIMEOUT = 10;
+
+    /**
+     * Times a security level read is attempted when Cloudflare times out or fails with a 5xx.
+     */
+    public const SECURITY_LEVEL_ATTEMPTS = 2;
+
+    /**
+     * The error message of the last failed attack mode toggle or security level read.
      */
     protected ?string $lastError = null;
 
@@ -269,10 +283,17 @@ class CloudflareService
 
     /**
      * Get the zone's current security level, or null when it cannot be read.
+     *
+     * Timeouts and 5xx responses are retried; the cause of a final failure
+     * is kept in lastError().
      */
     public function getSecurityLevel(Project $project): ?string
     {
+        $this->lastError = null;
+
         if (! $this->isConfigured($project)) {
+            $this->lastError = 'Cloudflare is not connected.';
+
             return null;
         }
 
@@ -280,18 +301,63 @@ class CloudflareService
 
         try {
             $response = Http::withToken($settings['api_token'])
+                ->timeout(self::SECURITY_LEVEL_TIMEOUT)
+                ->retry(self::SECURITY_LEVEL_ATTEMPTS, 1000, fn (Throwable $e) => $e instanceof ConnectionException
+                    || ($e instanceof RequestException && $e->response->serverError()), throw: false)
                 ->get("https://api.cloudflare.com/client/v4/zones/{$settings['zone_id']}/settings/security_level");
-
-            if (! $response->successful()) {
-                return null;
-            }
-
-            return $response->json('result.value');
         } catch (\Exception $e) {
             Log::error('Cloudflare Security Level Fetch Error: '.$e->getMessage());
+            $this->lastError = $this->securityLevelExceptionError($e);
 
             return null;
         }
+
+        $level = $response->successful() ? $response->json('result.value') : null;
+
+        if (! is_string($level)) {
+            Log::error('Cloudflare Security Level Fetch Failed: '.$response->status().' - '.$response->body());
+            $this->lastError = $this->securityLevelResponseError($response);
+
+            return null;
+        }
+
+        return $level;
+    }
+
+    /**
+     * Why a security level read got no response. Durations are left out so a
+     * persistent outage repeats the same message and is audited once.
+     */
+    protected function securityLevelExceptionError(\Exception $e): string
+    {
+        if (! preg_match('/cURL error (\d+)/', $e->getMessage(), $matches)) {
+            return 'Cloudflare API request failed: '.Str::limit($e->getMessage(), 150);
+        }
+
+        return $matches[1] === '28'
+            ? 'Cloudflare API did not respond within '.self::SECURITY_LEVEL_TIMEOUT.' seconds ('.self::SECURITY_LEVEL_ATTEMPTS.' attempts).'
+            : "Could not connect to the Cloudflare API (cURL error {$matches[1]}, ".self::SECURITY_LEVEL_ATTEMPTS.' attempts).';
+    }
+
+    /**
+     * Why Cloudflare rejected a security level read, with its own error code.
+     */
+    protected function securityLevelResponseError(Response $response): string
+    {
+        if ($response->successful()) {
+            return 'Cloudflare API response did not include a security level.';
+        }
+
+        $error = $response->json('errors.0.message');
+        $code = $response->json('errors.0.code');
+
+        $message = "Cloudflare API returned HTTP {$response->status()}"
+            .(is_string($error) ? ': '.Str::limit($error, 100) : '')
+            .($code !== null ? " (code {$code})" : '').'.';
+
+        return in_array($response->status(), [401, 403], true)
+            ? $message.' Check the zone ID and that the API token has the Zone Settings: Read permission.'
+            : $message;
     }
 
     /**

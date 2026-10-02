@@ -56,7 +56,7 @@ class AutoAttackModeEvaluator
         $level = $this->cloudflareService->getSecurityLevel($project);
 
         if ($level === null) {
-            $this->attackModeService->fail($project, AttackModeEvent::SOURCE_AUTOMATIC, 'Cloudflare API unavailable: could not read the current security level.');
+            $this->attackModeService->fail($project, AttackModeEvent::SOURCE_AUTOMATIC, 'Could not read the current security level, attack mode left unchanged. '.$this->cloudflareService->lastError());
 
             return self::OUTCOME_FAILED;
         }
@@ -70,7 +70,7 @@ class AutoAttackModeEvaluator
         $snapshot = $this->metrics->snapshot($project, $config, $now);
 
         if ($snapshot === null) {
-            $this->attackModeService->fail($project, AttackModeEvent::SOURCE_AUTOMATIC, 'Telemetry unavailable: Cloudflare analytics or Laraowl metrics could not be read.');
+            $this->attackModeService->fail($project, AttackModeEvent::SOURCE_AUTOMATIC, 'Could not read traffic metrics, attack mode left unchanged. Cloudflare analytics or Laraowl telemetry is unavailable.');
 
             return self::OUTCOME_FAILED;
         }

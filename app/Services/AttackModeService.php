@@ -114,7 +114,7 @@ class AttackModeService
             }
 
             $this->fail($project, $source, $actual === null
-                ? 'Could not confirm the security level on Cloudflare.'
+                ? 'Could not confirm the security level on Cloudflare. '.$this->cloudflareService->lastError()
                 : "Cloudflare reports security level '{$actual}' instead of '{$expected}'.", $metrics);
 
             return false;

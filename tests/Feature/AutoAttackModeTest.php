@@ -12,6 +12,8 @@ use App\Services\AttackModeService;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Sleep;
 use Inertia\Testing\AssertableInertia as Assert;
 
 /**
@@ -22,6 +24,14 @@ class FakeCloudflareZone
     public string $level = 'high';
 
     public bool $readFails = false;
+
+    /** Number of upcoming reads that time out. */
+    public int $readTimeouts = 0;
+
+    /** Cloudflare error returned for reads, as [status, code, message]. */
+    public ?array $readError = null;
+
+    public int $reads = 0;
 
     public bool $patchFails = false;
 
@@ -68,6 +78,20 @@ class FakeCloudflareZone
                     }
 
                     return Http::response(['success' => true, 'result' => ['value' => $this->level]]);
+                }
+
+                $this->reads++;
+
+                if ($this->readTimeouts > 0) {
+                    $this->readTimeouts--;
+
+                    return Http::failedConnection('cURL error 28: Operation timed out after 10001 milliseconds with 0 bytes received');
+                }
+
+                if ($this->readError !== null) {
+                    [$status, $code, $message] = $this->readError;
+
+                    return Http::response(['success' => false, 'errors' => [['code' => $code, 'message' => $message]]], $status);
                 }
 
                 return $this->readFails
@@ -235,6 +259,7 @@ function autoEnabledState(int $minutesAgo): array
 }
 
 beforeEach(function () {
+    Sleep::fake();
     $this->travelTo(Carbon::parse('2026-09-25 12:00:00'));
     $this->zone = new FakeCloudflareZone;
     $this->zone->fake();
@@ -644,6 +669,51 @@ test('unavailable cloudflare or telemetry leaves the mode unchanged', function (
     'security level unreadable' => ['readFails'],
     'analytics unavailable' => ['analyticsFails'],
 ]);
+
+test('a security level read that keeps timing out is retried and audited once as a timeout', function () {
+    $project = autoAttackProject();
+    $this->zone->withBaseline(120, 50);
+    $this->zone->readTimeouts = 4;
+
+    runAutoAttackMode();
+    runAutoAttackMode();
+
+    $reason = 'Could not read the current security level, attack mode left unchanged. Cloudflare API did not respond within 10 seconds (2 attempts).';
+
+    expect($this->zone->reads)->toBe(4)
+        ->and($this->zone->patches)->toBe(0)
+        ->and(attackState($project)['attack_mode_state']['last_error'])->toBe($reason)
+        ->and($project->attackModeEvents()->sole()->reason)->toBe($reason);
+});
+
+test('a single slow security level read is retried without a failure', function () {
+    $project = autoAttackProject();
+    $this->zone->withBaseline(120, 50);
+    $this->zone->readTimeouts = 1;
+
+    runAutoAttackMode();
+
+    expect($this->zone->reads)->toBe(2)
+        ->and($project->attackModeEvents()->exists())->toBeFalse()
+        ->and(attackState($project)['attack_mode_state']['last_error'])->toBeNull();
+});
+
+test('a rejected security level read is logged and audited with the cloudflare error', function () {
+    Log::spy();
+    $project = autoAttackProject();
+    $this->zone->readError = [403, 9109, 'Unauthorized to access requested resource'];
+
+    runAutoAttackMode();
+
+    expect($this->zone->reads)->toBe(1)
+        ->and($project->attackModeEvents()->sole()->reason)->toBe(
+            'Could not read the current security level, attack mode left unchanged. Cloudflare API returned HTTP 403: Unauthorized to access requested resource (code 9109). Check the zone ID and that the API token has the Zone Settings: Read permission.'
+        );
+
+    Log::shouldHaveReceived('error')
+        ->withArgs(fn (string $message) => str_starts_with($message, 'Cloudflare Security Level Fetch Failed: 403'))
+        ->once();
+});
 
 test('repeated runs are idempotent', function () {
     $project = autoAttackProject();
