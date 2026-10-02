@@ -22,6 +22,11 @@ class CloudflareService
     public const MITIGATION_ACTIONS = ['block', 'challenge', 'jschallenge', 'managed_challenge'];
 
     /**
+     * Challenges the security level itself issues, e.g. to every visitor while Under Attack Mode is on.
+     */
+    public const SECURITY_LEVEL_CHALLENGES = ['challenge', 'jschallenge', 'managed_challenge'];
+
+    /**
      * Seconds a security level read may take before it is given up.
      */
     public const SECURITY_LEVEL_TIMEOUT = 10;
@@ -478,11 +483,11 @@ GQL;
     }
 
     /**
-     * Per-minute edge request counts and block/challenge firewall events.
+     * Per-minute edge requests, mitigated requests and block/challenge firewall events.
      *
      * Adaptive group counts are already adjusted for Cloudflare's sampling.
      * Challenges issued by the security level itself (Under Attack Mode) are
-     * excluded, otherwise an active mode would keep its own threat ratio high.
+     * excluded, otherwise an active mode would keep its own traffic high.
      * Returns null when the data cannot be read, so callers can tell an
      * outage apart from a quiet zone.
      *
@@ -490,16 +495,11 @@ GQL;
      * back to raw firewallEventsAdaptive events, weighted by their sample
      * interval. That dataset returns at most 10000 events, newest first.
      *
-     * @return array{requests: array<string, int>, firewall: array<string, array{count: int, ips: array<int, string>}>}|null
+     * @return array{requests: array<string, int>, mitigated: array<string, int>, firewall: array<string, array{count: int, ips: array<int, string>}>}|null
      */
     public function getMinuteTraffic(Project $project, CarbonInterface $since, CarbonInterface $until): ?array
     {
-        $variables = [
-            'since' => $since->copy()->utc()->toIso8601ZuluString(),
-            'until' => $until->copy()->utc()->toIso8601ZuluString(),
-            'actions' => self::MITIGATION_ACTIONS,
-        ];
-
+        $variables = $this->minuteVariables($since, $until);
         $groupsUnavailableKey = 'cloudflare_firewall_groups_unavailable_'.($project->settings['cloudflare']['zone_id'] ?? '');
 
         if (! Cache::has($groupsUnavailableKey)) {
@@ -518,7 +518,7 @@ GQL;
                     'count' => (int) $group['count'],
                 ]);
 
-                return ['requests' => $this->minuteRequestCounts($zone), 'firewall' => $this->firewallBuckets($events->all())];
+                return $this->minuteRequests($zone) + ['firewall' => $this->firewallBuckets($events->all())];
             }
 
             Cache::put($groupsUnavailableKey, true, now()->addDay());
@@ -536,7 +536,7 @@ GQL;
             'count' => max(1, (int) ($event['sampleInterval'] ?? 1)),
         ]);
 
-        return ['requests' => $this->minuteRequestCounts($zone), 'firewall' => $this->firewallBuckets($events->all())];
+        return $this->minuteRequests($zone) + ['firewall' => $this->firewallBuckets($events->all())];
     }
 
     /**
@@ -568,22 +568,57 @@ GQL
 GQL;
 
         return <<<GQL
-        query (\$zoneTag: string, \$since: Time, \$until: Time, \$actions: [string!]) {
+        query (\$zoneTag: string, \$since: Time, \$until: Time, \$actions: [string!], \$challenges: [string!]) {
           viewer {
             zones(filter: { zoneTag: \$zoneTag }) {
-              requests: httpRequestsAdaptiveGroups(
-                limit: 1000
-                filter: { datetime_geq: \$since, datetime_lt: \$until }
-                orderBy: [datetimeMinute_ASC]
-              ) {
-                count
-                dimensions { datetimeMinute }
-              }
+        {$this->requestGroups(1000)}
         {$firewall}
             }
           }
         }
         GQL;
+    }
+
+    /**
+     * Requests per minute, and those of them mitigated by the zone's own rules.
+     *
+     * Both leave out the challenges issued by the security level: Under Attack
+     * Mode challenges every visitor, and bots that keep retrying the challenge
+     * would otherwise hold the request rate of an active mode high.
+     */
+    protected function requestGroups(int $limit): string
+    {
+        return <<<GQL
+              requests: httpRequestsAdaptiveGroups(
+                limit: {$limit}
+                filter: { datetime_geq: \$since, datetime_lt: \$until, OR: [{ securitySource_neq: "securitylevel" }, { securityAction_notin: \$challenges }] }
+                orderBy: [datetimeMinute_ASC]
+              ) {
+                count
+                dimensions { datetimeMinute }
+              }
+              mitigated: httpRequestsAdaptiveGroups(
+                limit: {$limit}
+                filter: { datetime_geq: \$since, datetime_lt: \$until, securityAction_in: \$actions, securitySource_neq: "securitylevel" }
+                orderBy: [datetimeMinute_ASC]
+              ) {
+                count
+                dimensions { datetimeMinute }
+              }
+        GQL;
+    }
+
+    /**
+     * @return array{since: string, until: string, actions: array<int, string>, challenges: array<int, string>}
+     */
+    protected function minuteVariables(CarbonInterface $since, CarbonInterface $until): array
+    {
+        return [
+            'since' => $since->copy()->utc()->toIso8601ZuluString(),
+            'until' => $until->copy()->utc()->toIso8601ZuluString(),
+            'actions' => self::MITIGATION_ACTIONS,
+            'challenges' => self::SECURITY_LEVEL_CHALLENGES,
+        ];
     }
 
     /**
@@ -599,17 +634,29 @@ GQL;
 
     /**
      * @param  array<string, mixed>  $zone
+     * @return array{requests: array<string, int>, mitigated: array<string, int>}
+     */
+    protected function minuteRequests(array $zone): array
+    {
+        return [
+            'requests' => $this->minuteCounts($zone['requests'] ?? []),
+            'mitigated' => $this->minuteCounts($zone['mitigated'] ?? []),
+        ];
+    }
+
+    /**
+     * @param  array<int, array{count: int, dimensions: array{datetimeMinute: string}}>  $groups
      * @return array<string, int>
      */
-    protected function minuteRequestCounts(array $zone): array
+    protected function minuteCounts(array $groups): array
     {
-        $requests = [];
-        foreach ($zone['requests'] ?? [] as $group) {
+        $counts = [];
+        foreach ($groups as $group) {
             $minute = $this->minuteKey($group['dimensions']['datetimeMinute']);
-            $requests[$minute] = ($requests[$minute] ?? 0) + (int) $group['count'];
+            $counts[$minute] = ($counts[$minute] ?? 0) + (int) $group['count'];
         }
 
-        return $requests;
+        return $counts;
     }
 
     /**
@@ -634,39 +681,25 @@ GQL;
     }
 
     /**
-     * Per-minute edge request counts, used to build the traffic baseline.
+     * Per-minute edge and mitigated request counts, used to build the traffic baseline.
      *
-     * @return array<string, int>|null
+     * @return array{requests: array<string, int>, mitigated: array<string, int>}|null
      */
-    public function getMinuteRequestCounts(Project $project, CarbonInterface $since, CarbonInterface $until): ?array
+    public function getMinuteRequests(Project $project, CarbonInterface $since, CarbonInterface $until): ?array
     {
-        $query = <<<'GQL'
-        query ($zoneTag: string, $since: Time, $until: Time) {
+        $query = <<<GQL
+        query (\$zoneTag: string, \$since: Time, \$until: Time, \$actions: [string!], \$challenges: [string!]) {
           viewer {
-            zones(filter: { zoneTag: $zoneTag }) {
-              requests: httpRequestsAdaptiveGroups(
-                limit: 1500
-                filter: { datetime_geq: $since, datetime_lt: $until }
-                orderBy: [datetimeMinute_ASC]
-              ) {
-                count
-                dimensions { datetimeMinute }
-              }
+            zones(filter: { zoneTag: \$zoneTag }) {
+        {$this->requestGroups(1500)}
             }
           }
         }
-GQL;
+        GQL;
 
-        $zone = $this->graphql($project, $query, [
-            'since' => $since->copy()->utc()->toIso8601ZuluString(),
-            'until' => $until->copy()->utc()->toIso8601ZuluString(),
-        ]);
+        $zone = $this->graphql($project, $query, $this->minuteVariables($since, $until));
 
-        if ($zone === null) {
-            return null;
-        }
-
-        return $this->minuteRequestCounts($zone);
+        return $zone === null ? null : $this->minuteRequests($zone);
     }
 
     /**

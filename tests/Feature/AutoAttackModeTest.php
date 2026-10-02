@@ -50,11 +50,20 @@ class FakeCloudflareZone
     /** @var array<string, int> */
     public array $requests = [];
 
+    /** @var array<string, int> Requests mitigated by the zone's own rules */
+    public array $mitigated = [];
+
+    /** @var array<string, int> Challenges issued by the security level, e.g. Under Attack Mode */
+    public array $challenges = [];
+
     /** @var array<string, array<string, int>> minute => [ip => count] */
     public array $firewall = [];
 
     /** @var array<string, int> */
     public array $baseline = [];
+
+    /** @var array<string, int> */
+    public array $baselineMitigated = [];
 
     public function fake(): void
     {
@@ -117,7 +126,18 @@ class FakeCloudflareZone
                 }
 
                 $isWindow = str_contains($request['query'], 'firewallEventsAdaptive');
-                $zone = ['requests' => $this->groups($isWindow ? $this->requests : $this->baseline)];
+                $requests = $isWindow ? $this->requests : $this->baseline;
+
+                if (! str_contains($request['query'], 'securityAction_notin: $challenges')) {
+                    foreach ($isWindow ? $this->challenges : [] as $minute => $count) {
+                        $requests[$minute] = ($requests[$minute] ?? 0) + $count;
+                    }
+                }
+
+                $zone = [
+                    'requests' => $this->groups($requests),
+                    'mitigated' => $this->groups($isWindow ? $this->mitigated : $this->baselineMitigated),
+                ];
 
                 if ($isWindow) {
                     // Raw events carry one sampled row per IP and minute, weighted by sampleInterval
@@ -138,10 +158,15 @@ class FakeCloudflareZone
     /**
      * Fill the baseline with the given number of minutes at a constant rate.
      */
-    public function withBaseline(int $minutes, int $requestsPerMinute): self
+    public function withBaseline(int $minutes, int $requestsPerMinute, int $mitigatedPerMinute = 0): self
     {
         for ($i = 1; $i <= $minutes; $i++) {
-            $this->baseline[now()->startOfMinute()->subMinutes(AttackModeMetrics::BASELINE_EXCLUDED_MINUTES + $i)->format('Y-m-d H:i')] = $requestsPerMinute;
+            $minute = now()->startOfMinute()->subMinutes(AttackModeMetrics::BASELINE_EXCLUDED_MINUTES + $i)->format('Y-m-d H:i');
+            $this->baseline[$minute] = $requestsPerMinute;
+
+            if ($mitigatedPerMinute > 0) {
+                $this->baselineMitigated[$minute] = $mitigatedPerMinute;
+            }
         }
 
         return $this;
@@ -184,9 +209,12 @@ function autoAttackRoute(string $name, Project $project): string
     return route($name, ['current_team' => $project->team->slug, 'project' => $project->slug]);
 }
 
+/**
+ * A minute counted back from the latest one evaluated, which trails the current minute by the analytics delay.
+ */
 function minuteKey(int $minutesAgo): string
 {
-    return now()->startOfMinute()->subMinutes($minutesAgo)->format('Y-m-d H:i');
+    return now()->startOfMinute()->subMinutes(AttackModeMetrics::ANALYTICS_DELAY_MINUTES + $minutesAgo)->format('Y-m-d H:i');
 }
 
 function runAutoAttackMode(): void
@@ -243,6 +271,7 @@ function serverErrors(Project $project, string $minute, int $count, int $errors)
 function spikeMinute(FakeCloudflareZone $zone, string $minute, int $requests = 1000): void
 {
     $zone->requests[$minute] = $requests;
+    $zone->mitigated[$minute] = (int) ($requests * 0.15);
     $zone->firewall[$minute] = ['1.1.1.1' => (int) ($requests * 0.08), '2.2.2.2' => (int) ($requests * 0.07)];
 }
 
@@ -364,7 +393,7 @@ test('a unique IP surge also qualifies a traffic spike', function () {
         $this->zone->requests[minuteKey($ago)] = 1000;
 
         for ($ip = 0; $ip < 6; $ip++) {
-            Record::factory()->create(['project_id' => $project->id, 'ip' => "8.8.8.{$ip}", 'created_at' => now()->subMinutes($ago)->startOfMinute()->addSeconds(10)]);
+            Record::factory()->create(['project_id' => $project->id, 'ip' => "8.8.8.{$ip}", 'created_at' => Carbon::parse(minuteKey($ago))->addSeconds(10)]);
         }
     }
 
@@ -380,6 +409,7 @@ test('an organic spike without threat, 5xx or IP signals does not enable attack 
 
     foreach (range(1, 15) as $ago) {
         $this->zone->requests[minuteKey($ago)] = 2000;
+        $this->zone->mitigated[minuteKey($ago)] = 10;
         $this->zone->firewall[minuteKey($ago)] = ['1.1.1.1' => 10];
         serverErrors($project, minuteKey($ago), 500, 5);
     }
@@ -439,6 +469,26 @@ test('a cloudflare firewall event spike enables attack mode', function (int $ips
     'from too few IPs' => [9, 'high'],
 ]);
 
+test('a cloudflare firewall event spike only counts events above the usual volume', function (int $eventsPerIp, string $expected) {
+    $project = autoAttackProject();
+    // Usually 100 mitigated requests per minute, so up to 150 is normal
+    $this->zone->withBaseline(120, 5000, mitigatedPerMinute: 100);
+
+    $this->zone->requests[minuteKey(1)] = 5000;
+    $this->zone->firewall[minuteKey(1)] = collect(range(1, 12))->mapWithKeys(fn ($i) => ["7.7.7.{$i}" => $eventsPerIp])->all();
+
+    runAutoAttackMode();
+
+    expect($this->zone->level)->toBe($expected);
+
+    if ($expected === 'under_attack') {
+        expect(attackState($project)['attack_mode_state']['reason'])->toContain('264 Cloudflare block/challenge events (usually up to 150) from 12 IPs');
+    }
+})->with([
+    'within the usual volume' => [20, 'high'],
+    'well above the usual volume' => [22, 'under_attack'],
+]);
+
 test('zones without grouped firewall analytics fall back to raw firewall events', function () {
     $project = autoAttackProject();
     $this->zone->firewallGroupsDenied = true;
@@ -486,6 +536,24 @@ test('with enough baseline history a spike below the baseline multiplier does no
     expect($this->zone->level)->toBe('high');
 });
 
+test('only mitigations above the usual volume of the zone are a threat signal', function (int $mitigated, string $expected) {
+    autoAttackProject();
+    // A zone that blocks bots around the clock: 20% of its usual traffic
+    $this->zone->withBaseline(120, 100, mitigatedPerMinute: 20);
+
+    foreach ([1, 2, 3] as $ago) {
+        $this->zone->requests[minuteKey($ago)] = 400;
+        $this->zone->mitigated[minuteKey($ago)] = $mitigated;
+    }
+
+    runAutoAttackMode();
+
+    expect($this->zone->level)->toBe($expected);
+})->with([
+    'usual bot blocking' => [60, 'high'],
+    'mitigations far above usual' => [100, 'under_attack'],
+]);
+
 test('an automatically enabled mode is disabled after the quiet window but not before the minimum active time', function () {
     $this->zone->level = 'under_attack';
     $project = autoAttackProject(firewallSettings: autoEnabledState(0));
@@ -517,7 +585,7 @@ test('a breach inside the quiet window restarts the countdown', function () {
 
     // Threat ratio breach 8 minutes ago: only 7 quiet minutes so far
     $this->zone->requests[minuteKey(8)] = 100;
-    $this->zone->firewall[minuteKey(8)] = ['1.1.1.1' => 10];
+    $this->zone->mitigated[minuteKey(8)] = 10;
 
     runAutoAttackMode();
 
@@ -531,6 +599,60 @@ test('a breach inside the quiet window restarts the countdown', function () {
     $this->travel(1)->minutes();
     runAutoAttackMode();
     expect($this->zone->level)->toBe('high');
+});
+
+test("under attack mode's own challenges do not keep it active", function () {
+    $this->zone->level = 'under_attack';
+    $project = autoAttackProject(firewallSettings: autoEnabledState(60));
+    $this->zone->withBaseline(120, 500);
+
+    foreach (range(1, 15) as $ago) {
+        $this->zone->requests[minuteKey($ago)] = 500;
+        $this->zone->challenges[minuteKey($ago)] = 1500;
+    }
+
+    runAutoAttackMode();
+
+    expect($this->zone->level)->toBe('high')
+        ->and(attackState($project)['attack_mode_state']['metrics']['requests_per_minute'])->toBe(500);
+});
+
+test('a steady background of mitigated requests does not keep an automatic mode active', function () {
+    $this->zone->level = 'under_attack';
+    autoAttackProject(firewallSettings: autoEnabledState(60));
+    $this->zone->withBaseline(120, 500, mitigatedPerMinute: 100);
+
+    // Night traffic: fewer visitors, the same blocked bots
+    foreach (range(1, 15) as $ago) {
+        $this->zone->requests[minuteKey($ago)] = 250;
+        $this->zone->mitigated[minuteKey($ago)] = 120;
+    }
+
+    runAutoAttackMode();
+
+    expect($this->zone->level)->toBe('high');
+});
+
+test('the latest minutes are left out while cloudflare analytics catch up', function () {
+    $this->zone->level = 'under_attack';
+    $project = autoAttackProject(firewallSettings: autoEnabledState(60));
+    $this->zone->withBaseline(120, 500);
+
+    foreach (range(1, 15) as $ago) {
+        $this->zone->requests[minuteKey($ago)] = 500;
+    }
+
+    // Minutes Cloudflare is still filling in: few requests so far, mitigations already counted
+    foreach ([1, 2] as $ago) {
+        $minute = now()->startOfMinute()->subMinutes($ago)->format('Y-m-d H:i');
+        $this->zone->requests[$minute] = 50;
+        $this->zone->mitigated[$minute] = 40;
+    }
+
+    runAutoAttackMode();
+
+    expect($this->zone->level)->toBe('high')
+        ->and(attackState($project)['attack_mode_state']['metrics']['minute'])->toBe(minuteKey(1));
 });
 
 test('a new high risk waf event keeps an automatic mode active', function () {

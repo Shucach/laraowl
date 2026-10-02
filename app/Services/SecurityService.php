@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Project;
 use App\Models\Record;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Str;
 
@@ -73,8 +74,22 @@ class SecurityService
         'lfi_rfi' => [
             'patterns' => [
                 "/php:\/\/filter/i",
-                "/https?:\/\/.*\.(txt|php|exe)/i",
                 "/expect:\/\//i",
+            ],
+            'score' => 50,
+        ],
+    ];
+
+    /**
+     * Threat patterns matched only against request parameters (query string and body).
+     *
+     * The request URL itself and headers such as User-Agent or Referer carry
+     * ordinary links to .php or .txt pages, e.g. facebookexternalhit's user agent.
+     */
+    protected array $parameterThreatPatterns = [
+        'lfi_rfi' => [
+            'patterns' => [
+                "/https?:\/\/.*\.(txt|php|exe)/i",
             ],
             'score' => 50,
         ],
@@ -107,24 +122,29 @@ class SecurityService
             $decoded = urldecode($val);
             $preparedInputs[$key] = $decoded;
 
-            // Check for potential Base64/Hex obfuscation
-            if ($this->isObfuscated($decoded)) {
-                $preparedInputs[$key.'_decoded'] = $this->deobfuscate($decoded);
+            // Check for potential Base64/Hex obfuscation; an undecodable value would only be matched twice
+            if ($this->isObfuscated($decoded) && ($deobfuscated = $this->deobfuscate($decoded)) !== $decoded) {
+                $preparedInputs[$key.'_decoded'] = $deobfuscated;
                 $totalScore += 10; // Penalty for obfuscated payload
             }
         }
 
+        $parameterInputs = array_diff_key($preparedInputs, array_flip(['url', 'url_decoded', 'headers', 'headers_decoded']));
+        $parameterInputs['url_query'] = urldecode((string) parse_url($rawInputs['url'], PHP_URL_QUERY));
+
         // 2. Pattern Matching
-        foreach ($preparedInputs as $source => $value) {
-            foreach ($this->threatPatterns as $type => $config) {
-                foreach ($config['patterns'] as $pattern) {
-                    if (preg_match($pattern, $value)) {
-                        $detectedThreats[] = [
-                            'type' => $type,
-                            'source' => $source,
-                            'pattern' => $pattern,
-                        ];
-                        $totalScore += $config['score'];
+        foreach ([[$this->threatPatterns, $preparedInputs], [$this->parameterThreatPatterns, $parameterInputs]] as [$patternGroups, $inputs]) {
+            foreach ($inputs as $source => $value) {
+                foreach ($patternGroups as $type => $config) {
+                    foreach ($config['patterns'] as $pattern) {
+                        if (preg_match($pattern, $value)) {
+                            $detectedThreats[] = [
+                                'type' => $type,
+                                'source' => $source,
+                                'pattern' => $pattern,
+                            ];
+                            $totalScore += $config['score'];
+                        }
                     }
                 }
             }
@@ -168,7 +188,7 @@ class SecurityService
         }
 
         // B. User-Agent Anomaly
-        $ua = $payload['headers']['user-agent'] ?? '';
+        $ua = $this->userAgent($payload);
         $suspiciousBots = ['sqlmap', 'nmap', 'nikto', 'dirbuster', 'gobuster', 'python-requests'];
         foreach ($suspiciousBots as $bot) {
             if (Str::contains(strtolower($ua), $bot)) {
@@ -181,6 +201,19 @@ class SecurityService
         }
 
         return $anomalies;
+    }
+
+    /**
+     * The request's User-Agent. Headers arrive as a JSON string or an array,
+     * with a single value or a list of values per header name.
+     */
+    protected function userAgent(array $payload): string
+    {
+        $headers = $payload['headers'] ?? [];
+        $headers = is_string($headers) ? json_decode($headers, true) : $headers;
+        $userAgent = is_array($headers) ? Arr::first(Arr::wrap(array_change_key_case($headers)['user-agent'] ?? null)) : null;
+
+        return is_string($userAgent) ? $userAgent : '';
     }
 
     /**

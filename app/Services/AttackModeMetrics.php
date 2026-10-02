@@ -19,6 +19,10 @@ use Throwable;
  * for ratios and relative values (5xx share, unique IPs against their own
  * baseline) and for WAF events, which sampling does not distort in a way that
  * matters for the thresholds.
+ *
+ * The threat ratio and firewall spikes only count what Cloudflare mitigated
+ * beyond the zone's usual volume, so rules that block bots or countries around
+ * the clock do not read as an attack.
  */
 class AttackModeMetrics
 {
@@ -42,17 +46,30 @@ class AttackModeMetrics
      */
     public const BASELINE_CACHE_SECONDS = 300;
 
+    /**
+     * Most recent completed minutes left out of the snapshot, as Cloudflare's analytics still fill them in.
+     */
+    public const ANALYTICS_DELAY_MINUTES = 3;
+
+    /**
+     * Multiple of the median mitigated requests per minute still treated as the zone's usual volume.
+     */
+    public const MITIGATION_TOLERANCE = 1.5;
+
     public function __construct(protected CloudflareService $cloudflareService) {}
 
     /**
-     * Snapshot of the completed minutes before $now, or null when Cloudflare or telemetry is unavailable.
+     * Snapshot of the minutes Cloudflare has completed analytics for, or null when Cloudflare or telemetry is unavailable.
+     *
+     * The window ends ANALYTICS_DELAY_MINUTES before the current minute; WAF
+     * events are Laraowl's own and are counted up to $now.
      *
      * @param  array<string, bool|int|float>  $config
-     * @return array{minutes: array<string, array{requests: int, threat_ratio: float, error_rate: float, unique_ips: int, firewall_events: int, firewall_unique_ips: int}>, baseline_requests: float|null, baseline_unique_ips: float|null, waf_events: int, waf_unique_ips: int, quiet_waf_events: int}|null
+     * @return array{minutes: array<string, array{requests: int, mitigated: int, threat_ratio: float, error_rate: float, unique_ips: int, firewall_events: int, firewall_unique_ips: int}>, until: string, baseline_requests: float|null, baseline_mitigated: float|null, usual_mitigated: float, baseline_unique_ips: float|null, waf_events: int, waf_unique_ips: int, quiet_waf_events: int}|null
      */
     public function snapshot(Project $project, array $config, CarbonInterface $now): ?array
     {
-        $until = $now->copy()->startOfMinute();
+        $until = $now->copy()->startOfMinute()->subMinutes(self::ANALYTICS_DELAY_MINUTES);
         $windowMinutes = max((int) $config['spike_window_minutes'], (int) $config['quiet_window_minutes'], 1);
         $since = $until->copy()->subMinutes($windowMinutes);
 
@@ -74,16 +91,19 @@ class AttackModeMetrics
             return null;
         }
 
+        $usualMitigated = ($baseline['mitigated'] ?? 0) * self::MITIGATION_TOLERANCE;
         $minutes = [];
 
         for ($minute = $since->toImmutable(); $minute->lt($until); $minute = $minute->addMinute()) {
             $key = $minute->format('Y-m-d H:i');
             $requests = $traffic['requests'][$key] ?? 0;
+            $mitigated = $traffic['mitigated'][$key] ?? 0;
             $firewall = $traffic['firewall'][$key] ?? ['count' => 0, 'ips' => []];
 
             $minutes[$key] = [
                 'requests' => $requests,
-                'threat_ratio' => $this->percentage($firewall['count'], max($requests, $firewall['count'])),
+                'mitigated' => $mitigated,
+                'threat_ratio' => $this->percentage(max(0, $mitigated - $usualMitigated), max($requests, $mitigated)),
                 'error_rate' => $errorRates[$key] ?? 0.0,
                 'unique_ips' => $uniqueIps[$key] ?? 0,
                 'firewall_events' => $firewall['count'],
@@ -93,7 +113,10 @@ class AttackModeMetrics
 
         return [
             'minutes' => $minutes,
+            'until' => $until->toIso8601String(),
             'baseline_requests' => $baseline['requests'],
+            'baseline_mitigated' => $baseline['mitigated'] ?? null,
+            'usual_mitigated' => $usualMitigated,
             'baseline_unique_ips' => $baseline['unique_ips'],
             'waf_events' => $waf['events'],
             'waf_unique_ips' => $waf['ips'],
@@ -102,10 +125,11 @@ class AttackModeMetrics
     }
 
     /**
-     * Median requests and unique IPs per minute over the last day, excluding
-     * the most recent minutes. A metric without enough history is null.
+     * Median requests, mitigated requests and unique IPs per minute over the
+     * last day, excluding the most recent minutes. A metric without enough
+     * history is null.
      *
-     * @return array{requests: float|null, unique_ips: float|null}|null
+     * @return array{requests: float|null, mitigated: float|null, unique_ips: float|null}|null
      */
     public function baseline(Project $project, CarbonInterface $until): ?array
     {
@@ -118,9 +142,9 @@ class AttackModeMetrics
         $baselineUntil = $until->copy()->subMinutes(self::BASELINE_EXCLUDED_MINUTES);
         $baselineSince = $until->copy()->subHours(self::BASELINE_HOURS);
 
-        $requests = $this->cloudflareService->getMinuteRequestCounts($project, $baselineSince, $baselineUntil);
+        $counts = $this->cloudflareService->getMinuteRequests($project, $baselineSince, $baselineUntil);
 
-        if ($requests === null) {
+        if ($counts === null) {
             return null;
         }
 
@@ -133,7 +157,9 @@ class AttackModeMetrics
         }
 
         $baseline = [
-            'requests' => $this->median($requests),
+            'requests' => $this->median($counts['requests']),
+            // Minutes without a mitigated request are missing from the response
+            'mitigated' => $this->median(array_map(fn (string $minute) => $counts['mitigated'][$minute] ?? 0, array_keys($counts['requests']))),
             'unique_ips' => $this->median($uniqueIps),
         ];
 
@@ -237,7 +263,7 @@ class AttackModeMetrics
             : (float) $sorted[$middle];
     }
 
-    protected function percentage(int $part, int $total): float
+    protected function percentage(int|float $part, int $total): float
     {
         return $total > 0 ? round($part / $total * 100, 2) : 0.0;
     }

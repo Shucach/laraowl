@@ -135,7 +135,7 @@ class AutoAttackModeEvaluator
         $quietSince = $this->quietSince($config, $snapshot);
         $quietWindow = (int) $config['quiet_window_minutes'];
         $isQuiet = $quietSince !== null
-            && Carbon::parse($quietSince)->diffInMinutes($now->copy()->startOfMinute(), true) >= $quietWindow;
+            && Carbon::parse($quietSince)->diffInMinutes(Carbon::parse($snapshot['until']), true) >= $quietWindow;
 
         $this->attackModeService->touch($project, [
             'last_evaluated_at' => $now->toIso8601String(),
@@ -211,14 +211,17 @@ class AutoAttackModeEvaluator
         }
 
         $latest = end($snapshot['minutes']);
+        $excessFirewallEvents = $latest !== false ? $latest['firewall_events'] - $snapshot['usual_mitigated'] : 0;
 
         if ($latest !== false
-            && $latest['firewall_events'] >= $config['firewall_events_threshold']
+            && $excessFirewallEvents >= $config['firewall_events_threshold']
             && $latest['firewall_unique_ips'] >= $config['firewall_unique_ips_threshold']) {
+            $usual = $snapshot['usual_mitigated'] > 0 ? ' (usually up to '.round($snapshot['usual_mitigated']).')' : '';
+
             return [
                 'criterion' => self::CRITERION_FIREWALL_SPIKE,
                 'label' => 'Cloudflare firewall spike',
-                'reason' => "{$latest['firewall_events']} Cloudflare block/challenge events from {$latest['firewall_unique_ips']} IPs in one minute.",
+                'reason' => "{$latest['firewall_events']} Cloudflare block/challenge events{$usual} from {$latest['firewall_unique_ips']} IPs in one minute.",
             ];
         }
 
@@ -305,6 +308,8 @@ class AutoAttackModeEvaluator
             'minute' => $latestKey,
             'requests_per_minute' => $latest['requests'] ?? 0,
             'baseline_requests' => $snapshot['baseline_requests'],
+            'mitigated_per_minute' => $latest['mitigated'] ?? 0,
+            'baseline_mitigated' => $snapshot['baseline_mitigated'],
             'threat_ratio' => $latest['threat_ratio'] ?? 0,
             'error_rate' => $latest['error_rate'] ?? 0,
             'unique_ips' => $latest['unique_ips'] ?? 0,

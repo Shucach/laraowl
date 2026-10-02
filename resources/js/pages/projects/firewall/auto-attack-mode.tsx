@@ -78,7 +78,7 @@ const sections: { title: string; description: string; fields: Field[] }[] = [
     {
         title: 'Traffic Spike',
         description:
-            'Enable when request rate exceeds both thresholds for consecutive minutes and at least one extra signal fires.',
+            "Enable when request rate exceeds both thresholds for consecutive minutes and at least one extra signal fires. The threat ratio only counts Cloudflare mitigations above the zone's usual volume.",
         fields: [
             {
                 key: 'request_rate_threshold',
@@ -98,7 +98,7 @@ const sections: { title: string; description: string; fields: Field[] }[] = [
             },
             {
                 key: 'threat_ratio_threshold',
-                label: 'Threat / challenge ratio',
+                label: 'Excess threat ratio',
                 unit: '%',
                 step: '0.1',
             },
@@ -129,11 +129,11 @@ const sections: { title: string; description: string; fields: Field[] }[] = [
     {
         title: 'Cloudflare Firewall Spike',
         description:
-            'Enable on a burst of block/challenge events in one minute.',
+            "Enable on a burst of block/challenge events in one minute, counted above the zone's usual volume.",
         fields: [
             {
                 key: 'firewall_events_threshold',
-                label: 'Block / challenge events',
+                label: 'Events above usual',
                 unit: 'events',
             },
             {
@@ -146,7 +146,7 @@ const sections: { title: string; description: string; fields: Field[] }[] = [
     {
         title: 'Automatic Disable',
         description:
-            'Only modes enabled by automation are disabled, once every condition holds for the whole quiet window.',
+            "Only modes enabled by automation are disabled, once every condition holds for the whole quiet window. Under Attack Mode's own challenges are not counted as traffic.",
         fields: [
             {
                 key: 'min_active_minutes',
@@ -171,7 +171,7 @@ const sections: { title: string; description: string; fields: Field[] }[] = [
             },
             {
                 key: 'quiet_threat_ratio_threshold',
-                label: 'Threat / challenge ratio below',
+                label: 'Excess threat ratio below',
                 unit: '%',
                 step: '0.1',
             },
@@ -206,7 +206,9 @@ const metricLabels: Record<string, string> = {
     minute: 'Minute',
     requests_per_minute: 'Requests / min',
     baseline_requests: 'Baseline requests',
-    threat_ratio: 'Threat ratio %',
+    mitigated_per_minute: 'CF mitigated / min',
+    baseline_mitigated: 'Baseline mitigated',
+    threat_ratio: 'Excess threat ratio %',
     error_rate: '5xx share %',
     unique_ips: 'Unique IPs',
     baseline_unique_ips: 'Baseline unique IPs',
